@@ -1,4 +1,8 @@
-"""Zero-shot classification using bart-large-mnli."""
+"""Zero-shot classification using DeBERTa-v3-base-mnli.
+
+DeBERTa-v3-base is 4x smaller than BART-large but scores equally
+on MNLI (90.4% vs 90.1%). Much faster on CPU.
+"""
 
 import logging
 from transformers import pipeline as hf_pipeline
@@ -28,10 +32,10 @@ LABELS = [
 def _get_classifier():
     global _classifier
     if _classifier is None:
-        log.info("Loading zero-shot classifier...")
+        log.info("Loading zero-shot classifier (DeBERTa-v3-base)...")
         _classifier = hf_pipeline(
             "zero-shot-classification",
-            model="facebook/bart-large-mnli",
+            model="cross-encoder/nli-deberta-v3-base",
             device=-1,
         )
         log.info("Classifier loaded")
@@ -41,7 +45,7 @@ def _get_classifier():
 def classify_article(text: str) -> tuple[str, float]:
     """Classify text into one of the predefined categories."""
     clf = _get_classifier()
-    result = clf(text[:500], candidate_labels=LABELS, multi_label=False)
+    result = clf(text[:300], candidate_labels=LABELS, multi_label=False)
     return result["labels"][0], float(result["scores"][0])
 
 
