@@ -8,9 +8,9 @@ from . import db
 
 log = logging.getLogger(__name__)
 
-SAME_EVENT_THRESHOLD = 0.88
-SAME_THEME_THRESHOLD = 0.78
-NEW_TOPIC_THRESHOLD = 0.70
+SAME_EVENT_THRESHOLD = 0.82
+SAME_THEME_THRESHOLD = 0.65
+NEW_TOPIC_THRESHOLD = 0.55
 
 
 def parse_embedding(embedding_str: str) -> list[float]:
