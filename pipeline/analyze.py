@@ -71,9 +71,9 @@ def run():
         # ── Step 3: KeyBERT ──
         log.info("Step 3: Extracting keywords (KeyBERT)...")
         with db.get_cursor() as cur:
-            articles_kw = db.fetch_articles_for_ner(cur)
+            articles_kw = db.fetch_articles_for_keywords(cur)
             if articles_kw:
-                run_keyword_extraction(cur, articles_kw[:100])
+                run_keyword_extraction(cur, articles_kw)
 
         # ── Step 4: Sentiment ──
         log.info("Step 4: Analyzing sentiment...")

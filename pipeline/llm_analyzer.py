@@ -10,6 +10,7 @@ Strategy (optimized for cost, June 2026):
 import json
 import logging
 import os
+import re
 
 import httpx
 
@@ -23,13 +24,62 @@ OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 GROK_URL = "https://api.x.ai/v1/chat/completions"
 
 
+def _strip_json_fence(text: str) -> str:
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        stripped = re.sub(r"^```(?:json)?\s*", "", stripped, flags=re.IGNORECASE)
+        stripped = re.sub(r"\s*```$", "", stripped)
+    return stripped.strip()
+
+
+def _extract_json_candidate(text: str) -> str:
+    stripped = _strip_json_fence(text)
+    if stripped.startswith("{") or stripped.startswith("["):
+        return stripped
+
+    starts = [pos for pos in (stripped.find("{"), stripped.find("[")) if pos >= 0]
+    if not starts:
+        return stripped
+
+    start = min(starts)
+    open_char = stripped[start]
+    close_char = "}" if open_char == "{" else "]"
+    end = stripped.rfind(close_char)
+    if end <= start:
+        return stripped[start:]
+    return stripped[start:end + 1]
+
+
+def _remove_trailing_commas(text: str) -> str:
+    return re.sub(r",\s*([}\]])", r"\1", text)
+
+
+def parse_llm_json(text: str, provider: str) -> dict | None:
+    """Parse provider JSON with small repairs for common LLM formatting issues."""
+    candidate = _extract_json_candidate(text)
+
+    for attempt in (candidate, _remove_trailing_commas(candidate)):
+        try:
+            parsed = json.loads(attempt)
+            if isinstance(parsed, dict):
+                return parsed
+            log.warning("%s JSON ignored: root value is %s", provider, type(parsed).__name__)
+            return None
+        except json.JSONDecodeError:
+            continue
+
+    preview = candidate[:500].replace("\n", "\\n")
+    log.error("%s JSON parse failed. Preview: %s", provider, preview)
+    return None
+
+
 # ── Prompts ──────────────────────────────────────────────────────────────────
 
 CLUSTER_ANALYSIS_PROMPT = """You are a tech and finance analyst. Analyze this cluster of related articles.
 
 Cluster title: {title}
 Number of sources: {source_count}
-Source types: {source_types}
+Sources: {source_names}
 
 Articles:
 {articles_text}
@@ -83,7 +133,7 @@ def analyze_with_deepseek(prompt: str, model: str = "deepseek-v4-flash") -> dict
                 "model": model,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.3,
-                "max_tokens": 2000,
+                "max_tokens": 3500,
                 "response_format": {"type": "json_object"},
             },
             timeout=60,
@@ -91,7 +141,7 @@ def analyze_with_deepseek(prompt: str, model: str = "deepseek-v4-flash") -> dict
         resp.raise_for_status()
         data = resp.json()
         text = data["choices"][0]["message"]["content"]
-        return json.loads(text)
+        return parse_llm_json(text, "DeepSeek")
     except Exception as e:
         log.error("DeepSeek error: %s", e)
         return None
@@ -111,7 +161,7 @@ def analyze_with_gemini(prompt: str) -> dict | None:
                 "contents": [{"parts": [{"text": prompt}]}],
                 "generationConfig": {
                     "temperature": 0.3,
-                    "maxOutputTokens": 2000,
+                    "maxOutputTokens": 3500,
                     "responseMimeType": "application/json",
                 },
             },
@@ -120,7 +170,7 @@ def analyze_with_gemini(prompt: str) -> dict | None:
         resp.raise_for_status()
         data = resp.json()
         text = data["candidates"][0]["content"]["parts"][0]["text"]
-        return json.loads(text)
+        return parse_llm_json(text, "Gemini")
     except Exception as e:
         log.error("Gemini error: %s", e)
         return None
@@ -141,7 +191,7 @@ def analyze_with_openai(prompt: str, model: str = "gpt-4o-mini") -> dict | None:
                 "model": model,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.3,
-                "max_tokens": 2000,
+                "max_tokens": 3500,
                 "response_format": {"type": "json_object"},
             },
             timeout=60,
@@ -149,7 +199,7 @@ def analyze_with_openai(prompt: str, model: str = "gpt-4o-mini") -> dict | None:
         resp.raise_for_status()
         data = resp.json()
         text = data["choices"][0]["message"]["content"]
-        return json.loads(text)
+        return parse_llm_json(text, "OpenAI")
     except Exception as e:
         log.error("OpenAI error: %s", e)
         return None
@@ -177,15 +227,7 @@ def analyze_with_grok(prompt: str, model: str = "grok-4.3") -> dict | None:
         resp.raise_for_status()
         data = resp.json()
         text = data["choices"][0]["message"]["content"]
-
-        # Grok doesn't always respect JSON-only — try to extract JSON
-        if text.strip().startswith("{"):
-            return json.loads(text)
-        start = text.find("{")
-        end = text.rfind("}") + 1
-        if start >= 0 and end > start:
-            return json.loads(text[start:end])
-        return None
+        return parse_llm_json(text, "Grok")
     except Exception as e:
         log.error("Grok error: %s", e)
         return None
@@ -202,12 +244,12 @@ def build_cluster_prompt(cluster: dict, articles: list[dict]) -> str:
         date_str = str(pub)[:10] if pub else "unknown"
         articles_text += f"\n{i}. [{a['source_name']}] ({date_str}) {a['title']}\n   {desc[:200]}\n"
 
-    source_types = list(set(a["source_type"] for a in articles))
+    source_names = sorted(set(a["source_name"] for a in articles if a.get("source_name")))
 
     return CLUSTER_ANALYSIS_PROMPT.format(
         title=cluster["title"],
         source_count=len(articles),
-        source_types=", ".join(source_types),
+        source_names=", ".join(source_names),
         articles_text=articles_text,
     )
 

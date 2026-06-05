@@ -82,6 +82,21 @@ def fetch_articles_for_classification(cur, limit: int = 300) -> list[dict]:
     return cur.fetchall()
 
 
+def fetch_articles_for_keywords(cur, limit: int = 100) -> list[dict]:
+    """Recent processed articles used for keyword discovery."""
+    cur.execute(
+        """
+        SELECT id, title, description, full_text
+        FROM articles
+        WHERE status IN ('processed', 'clustered', 'analyzed')
+        ORDER BY fetched_at DESC
+        LIMIT %s
+        """,
+        (limit,),
+    )
+    return cur.fetchall()
+
+
 def fetch_articles_for_sentiment(cur, limit: int = 300) -> list[dict]:
     """Articles without sentiment analysis."""
     cur.execute(
@@ -125,11 +140,17 @@ def fetch_active_clusters(cur) -> list[dict]:
     """Get all active clusters with their centroids."""
     cur.execute(
         """
-        SELECT id, title, centroid::text as centroid_str,
-               article_count, source_diversity, importance_score
-        FROM clusters
-        WHERE status IN ('active', 'growing')
-        ORDER BY last_updated_at DESC
+        SELECT c.id, c.title, c.centroid::text as centroid_str,
+               c.article_count, c.source_diversity, c.importance_score,
+               COALESCE(
+                 ARRAY_AGG(DISTINCT a.source_name) FILTER (WHERE a.source_name IS NOT NULL),
+                 ARRAY[]::text[]
+               ) AS source_names
+        FROM clusters c
+        LEFT JOIN articles a ON a.cluster_id = c.id
+        WHERE c.status IN ('active', 'growing')
+        GROUP BY c.id
+        ORDER BY c.last_updated_at DESC
         """
     )
     return cur.fetchall()
@@ -195,7 +216,12 @@ def fetch_top_clusters(cur, limit: int = 20) -> list[dict]:
                c.first_seen_at, c.last_updated_at
         FROM clusters c
         WHERE c.status IN ('active', 'growing')
-        ORDER BY (c.importance_score + c.growth_score * 10 + c.novelty_score * 15) DESC
+          AND c.article_count >= 2
+        ORDER BY (
+          c.importance_score
+          + LEAST(c.growth_score, 20) * 2
+          + c.novelty_score * 2
+        ) DESC
         LIMIT %s
         """,
         (limit,),

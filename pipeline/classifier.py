@@ -8,6 +8,7 @@ import logging
 from transformers import pipeline as hf_pipeline
 
 from . import db
+from .hf_utils import handle_hf_unavailable, hf_steps_disabled
 
 log = logging.getLogger(__name__)
 
@@ -51,6 +52,16 @@ def classify_article(text: str) -> tuple[str, float]:
 
 def run_classification(cur, articles: list[dict]) -> int:
     """Classify articles and store results."""
+    if hf_steps_disabled():
+        log.info("Classification skipped: TECHPULSE_SKIP_HF_ML enabled")
+        return 0
+
+    try:
+        _get_classifier()
+    except Exception as exc:
+        if handle_hf_unavailable(log, "Classification", exc):
+            return 0
+
     total = len(articles)
     classified = 0
 

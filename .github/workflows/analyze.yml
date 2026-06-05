@@ -23,6 +23,14 @@ jobs:
           python-version: '3.12'
           cache: 'pip'
 
+      - name: Cache Hugging Face models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-models-v1-${{ runner.os }}
+          restore-keys: |
+            hf-models-v1-
+
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 

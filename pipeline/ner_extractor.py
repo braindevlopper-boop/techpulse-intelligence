@@ -4,6 +4,7 @@ import logging
 from transformers import pipeline as hf_pipeline
 
 from . import db
+from .hf_utils import handle_hf_unavailable, hf_steps_disabled
 
 log = logging.getLogger(__name__)
 
@@ -12,8 +13,25 @@ _ner = None
 NER_TYPE_MAP = {
     "ORG": "company",
     "PER": "person",
-    "LOC": "country",
+    "LOC": "location",
     "MISC": "technology",
+}
+
+ENTITY_STOPLIST = {
+    "ai",
+    "us",
+    "u s",
+    "u.s.",
+    "uk",
+    "reuters",
+    "bloomberg",
+    "bloomberg tech",
+    "bloomberg technology",
+    "hacker news",
+    "techcrunch",
+    "the verge",
+    "ars technica",
+    "cnbc",
 }
 
 
@@ -42,7 +60,10 @@ def extract_entities(text: str) -> list[dict]:
         if len(name) < 2 or name.startswith("##"):
             continue
 
-        key = name.lower()
+        key = " ".join(name.lower().replace(".", " ").split())
+        if key in ENTITY_STOPLIST:
+            continue
+
         if key not in seen or ent["score"] > seen[key]["score"]:
             seen[key] = {
                 "name": name,
@@ -55,6 +76,16 @@ def extract_entities(text: str) -> list[dict]:
 
 def run_ner(cur, articles: list[dict]) -> int:
     """Run NER on articles and store entities in DB."""
+    if hf_steps_disabled():
+        log.info("NER skipped: TECHPULSE_SKIP_HF_ML enabled")
+        return 0
+
+    try:
+        _get_ner()
+    except Exception as exc:
+        if handle_hf_unavailable(log, "NER", exc):
+            return 0
+
     total_entities = 0
     total_articles = len(articles)
 

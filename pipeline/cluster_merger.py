@@ -116,7 +116,7 @@ def execute_merges(cur, merge_groups: list[dict]) -> int:
                     SELECT COUNT(*) FROM cluster_articles WHERE cluster_id = %s
                 ),
                 source_diversity = (
-                    SELECT COUNT(DISTINCT a.source_type)
+                    SELECT COUNT(DISTINCT a.source_name)
                     FROM articles a WHERE a.cluster_id = %s
                 ),
                 last_updated_at = NOW()

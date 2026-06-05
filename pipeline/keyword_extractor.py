@@ -4,6 +4,7 @@ import logging
 from keybert import KeyBERT
 
 from . import db
+from .hf_utils import handle_hf_unavailable, hf_steps_disabled
 
 log = logging.getLogger(__name__)
 
@@ -34,6 +35,16 @@ def extract_keywords(text: str, top_n: int = 8) -> list[tuple[str, float]]:
 
 def run_keyword_extraction(cur, articles: list[dict]) -> int:
     """Extract keywords from articles and store in DB."""
+    if hf_steps_disabled():
+        log.info("Keyword extraction skipped: TECHPULSE_SKIP_HF_ML enabled")
+        return 0
+
+    try:
+        _get_model()
+    except Exception as exc:
+        if handle_hf_unavailable(log, "Keyword extraction", exc):
+            return 0
+
     total = 0
 
     for article in articles:

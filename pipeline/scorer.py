@@ -23,8 +23,8 @@ def run_scoring(cur) -> int:
 
         # ── Importance score ──
         article_count = len(articles)
-        source_types = set(a["source_type"] for a in articles)
-        source_diversity = len(source_types)
+        source_names = set(a["source_name"] for a in articles if a.get("source_name"))
+        source_diversity = len(source_names)
         avg_external = sum(a.get("external_score") or 0 for a in articles) / max(article_count, 1)
 
         importance = (
@@ -48,7 +48,7 @@ def run_scoring(cur) -> int:
         if older_articles:
             growth = len(recent_articles) / max(len(older_articles), 1)
         else:
-            growth = len(recent_articles) * 2
+            growth = min(len(recent_articles) * 2, 3)
 
         # ── Novelty score ──
         first_seen = cluster.get("first_seen_at")

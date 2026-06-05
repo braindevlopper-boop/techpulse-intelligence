@@ -4,6 +4,7 @@ import logging
 from transformers import pipeline as hf_pipeline
 
 from . import db
+from .hf_utils import handle_hf_unavailable, hf_steps_disabled
 
 log = logging.getLogger(__name__)
 
@@ -32,7 +33,16 @@ LABEL_MAP = {
 
 def run_sentiment_analysis(cur, articles: list[dict]) -> int:
     """Analyze sentiment of articles."""
-    model = _get_model()
+    if hf_steps_disabled():
+        log.info("Sentiment skipped: TECHPULSE_SKIP_HF_ML enabled")
+        return 0
+
+    try:
+        model = _get_model()
+    except Exception as exc:
+        if handle_hf_unavailable(log, "Sentiment", exc):
+            return 0
+
     total = len(articles)
     analyzed = 0
 

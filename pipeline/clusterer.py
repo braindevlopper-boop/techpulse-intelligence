@@ -7,10 +7,10 @@ from . import db
 
 log = logging.getLogger(__name__)
 
-SAME_EVENT_THRESHOLD = 0.82
-SAME_THEME_THRESHOLD = 0.72
+SAME_EVENT_THRESHOLD = 0.88
+SAME_THEME_THRESHOLD = 0.82
 NEW_TOPIC_THRESHOLD = 0.60
-MAX_CLUSTER_SIZE = 15
+MAX_CLUSTER_SIZE = 12
 
 
 def parse_embedding(embedding_str: str) -> list[float]:
@@ -52,7 +52,7 @@ def run_clustering(cur) -> tuple[int, int]:
                 "centroid": parse_embedding(c["centroid_str"]),
                 "founder_embedding": parse_embedding(c["centroid_str"]),
                 "article_count": c["article_count"],
-                "source_types": set(),
+                "source_names": set(c.get("source_names") or []),
             }
 
     created = 0
@@ -75,7 +75,7 @@ def run_clustering(cur) -> tuple[int, int]:
             if sim > best_similarity:
                 # Also check similarity with the founding article
                 founder_sim = cosine_similarity(emb, cdata["founder_embedding"])
-                if founder_sim >= SAME_THEME_THRESHOLD - 0.05:
+                if founder_sim >= SAME_THEME_THRESHOLD:
                     best_similarity = sim
                     best_cluster_id = cid
 
@@ -86,7 +86,7 @@ def run_clustering(cur) -> tuple[int, int]:
 
             cdata = cluster_data[best_cluster_id]
             cdata["article_count"] += 1
-            cdata["source_types"].add(article["source_type"])
+            cdata["source_names"].add(article["source_name"])
 
             # Update centroid (slow drift — weighted toward founder)
             count = cdata["article_count"]
@@ -102,7 +102,7 @@ def run_clustering(cur) -> tuple[int, int]:
 
             db.update_cluster_centroid(
                 cur, best_cluster_id, new_centroid,
-                cdata["article_count"], len(cdata["source_types"]),
+                cdata["article_count"], len(cdata["source_names"]),
             )
             updated += 1
 
@@ -117,7 +117,7 @@ def run_clustering(cur) -> tuple[int, int]:
                 "centroid": emb,
                 "founder_embedding": emb,
                 "article_count": 1,
-                "source_types": {article["source_type"]},
+                "source_names": {article["source_name"]},
             }
             created += 1
 
