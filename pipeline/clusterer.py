@@ -1,7 +1,6 @@
 """Clustering engine using pgvector similarity in Neon."""
 
 import logging
-import json
 import numpy as np
 
 from . import db
@@ -11,6 +10,7 @@ log = logging.getLogger(__name__)
 SAME_EVENT_THRESHOLD = 0.82
 SAME_THEME_THRESHOLD = 0.72
 NEW_TOPIC_THRESHOLD = 0.60
+MAX_CLUSTER_SIZE = 15
 
 
 def parse_embedding(embedding_str: str) -> list[float]:
@@ -29,19 +29,13 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
     return float(dot / norm)
 
 
-def compute_centroid(embeddings: list[list[float]]) -> list[float]:
-    arr = np.array(embeddings)
-    centroid = arr.mean(axis=0)
-    norm = np.linalg.norm(centroid)
-    if norm > 0:
-        centroid = centroid / norm
-    return centroid.tolist()
-
-
 def run_clustering(cur) -> tuple[int, int]:
     """Cluster processed articles using pgvector similarity.
 
-    Returns (clusters_created, clusters_updated).
+    Anti-snowball measures:
+      - Clusters are capped at MAX_CLUSTER_SIZE articles
+      - New articles must be similar to BOTH the centroid AND the
+        founding article (prevents centroid drift)
     """
     articles = db.fetch_processed_articles(cur)
     if not articles:
@@ -56,6 +50,7 @@ def run_clustering(cur) -> tuple[int, int]:
         if c["centroid_str"]:
             cluster_data[c["id"]] = {
                 "centroid": parse_embedding(c["centroid_str"]),
+                "founder_embedding": parse_embedding(c["centroid_str"]),
                 "article_count": c["article_count"],
                 "source_types": set(),
             }
@@ -72,10 +67,17 @@ def run_clustering(cur) -> tuple[int, int]:
         best_similarity = 0.0
 
         for cid, cdata in cluster_data.items():
+            # Skip full clusters
+            if cdata["article_count"] >= MAX_CLUSTER_SIZE:
+                continue
+
             sim = cosine_similarity(emb, cdata["centroid"])
             if sim > best_similarity:
-                best_similarity = sim
-                best_cluster_id = cid
+                # Also check similarity with the founding article
+                founder_sim = cosine_similarity(emb, cdata["founder_embedding"])
+                if founder_sim >= SAME_THEME_THRESHOLD - 0.05:
+                    best_similarity = sim
+                    best_cluster_id = cid
 
         if best_similarity >= SAME_THEME_THRESHOLD and best_cluster_id:
             role = "primary" if best_similarity >= SAME_EVENT_THRESHOLD else "supporting"
@@ -86,7 +88,9 @@ def run_clustering(cur) -> tuple[int, int]:
             cdata["article_count"] += 1
             cdata["source_types"].add(article["source_type"])
 
-            alpha = 1.0 / cdata["article_count"]
+            # Update centroid (slow drift — weighted toward founder)
+            count = cdata["article_count"]
+            alpha = 1.0 / count
             new_centroid = [
                 (1 - alpha) * c + alpha * e
                 for c, e in zip(cdata["centroid"], emb)
@@ -102,20 +106,8 @@ def run_clustering(cur) -> tuple[int, int]:
             )
             updated += 1
 
-        elif best_similarity < NEW_TOPIC_THRESHOLD or not best_cluster_id:
-            new_id = db.gen_id()
-            db.create_cluster(cur, new_id, article["title"][:200], emb)
-            db.update_article_cluster(cur, article["id"], new_id)
-            db.insert_cluster_article(cur, new_id, article["id"], 1.0, "primary")
-
-            cluster_data[new_id] = {
-                "centroid": emb,
-                "article_count": 1,
-                "source_types": {article["source_type"]},
-            }
-            created += 1
-
         else:
+            # Create new cluster — this article becomes the founder
             new_id = db.gen_id()
             db.create_cluster(cur, new_id, article["title"][:200], emb)
             db.update_article_cluster(cur, article["id"], new_id)
@@ -123,6 +115,7 @@ def run_clustering(cur) -> tuple[int, int]:
 
             cluster_data[new_id] = {
                 "centroid": emb,
+                "founder_embedding": emb,
                 "article_count": 1,
                 "source_types": {article["source_type"]},
             }
