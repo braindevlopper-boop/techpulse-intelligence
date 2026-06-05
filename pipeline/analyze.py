@@ -22,6 +22,7 @@ from .classifier import run_classification
 from .keyword_extractor import run_keyword_extraction
 from .sentiment_analyzer import run_sentiment_analysis
 from .clusterer import run_clustering
+from .cluster_merger import run_cluster_merging
 from .scorer import run_scoring
 from .llm_analyzer import run_llm_analysis, run_weak_signal_analysis
 from .signal_detector import detect_weak_signals
@@ -87,6 +88,12 @@ def run():
             created, updated = run_clustering(cur)
             stats["clusters_created"] = created
             stats["clusters_updated"] = updated
+
+        # ── Step 5b: LLM cluster merging (Pass 2) ──
+        log.info("Step 5b: Merging similar clusters (LLM)...")
+        with db.get_cursor() as cur:
+            merged = run_cluster_merging(cur)
+            log.info("Merged %d cluster groups", merged)
 
         # ── Step 6: Scoring ──
         log.info("Step 6: Scoring clusters...")
