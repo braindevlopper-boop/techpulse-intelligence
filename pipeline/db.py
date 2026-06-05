@@ -303,6 +303,24 @@ def insert_analysis(cur, target_type: str, target_id: str,
     )
 
 
+# ── Timeline events ──
+
+def insert_timeline_event(cur, cluster_id: str, title: str,
+                          description: str | None, event_date: str | None,
+                          importance: int = 0, source_article_id: str | None = None):
+    """Insert a timeline event for a cluster. Skip duplicates by title."""
+    cur.execute(
+        """
+        INSERT INTO timeline_events (id, cluster_id, title, description,
+                                     event_date, importance, source_article_id)
+        VALUES (%s, %s, %s, %s, %s::timestamptz, %s, %s)
+        ON CONFLICT DO NOTHING
+        """,
+        (gen_id(), cluster_id, title, description,
+         event_date, importance, source_article_id),
+    )
+
+
 # ── Podcasts ──
 
 def insert_podcast(cur, title: str, description: str, script: str,

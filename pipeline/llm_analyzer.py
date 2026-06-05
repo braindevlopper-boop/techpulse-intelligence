@@ -43,6 +43,7 @@ Produce a JSON response with these fields:
 - "risk_level": "low" | "medium" | "high"
 - "key_takeaways": array of 3 key points (in French)
 - "suggested_keywords": array of 3-5 keywords to track
+- "timeline_events": array of key events, each with: "date" (ISO YYYY-MM-DD if known, or null), "title" (short event description in French), "importance" (1-10). Extract 2-5 events from the articles showing how this story evolved.
 
 Respond ONLY with valid JSON, no markdown."""
 
@@ -197,7 +198,9 @@ def build_cluster_prompt(cluster: dict, articles: list[dict]) -> str:
     articles_text = ""
     for i, a in enumerate(articles[:8], 1):
         desc = a.get("description") or ""
-        articles_text += f"\n{i}. [{a['source_name']}] {a['title']}\n   {desc[:200]}\n"
+        pub = a.get("published_at", "")
+        date_str = str(pub)[:10] if pub else "unknown"
+        articles_text += f"\n{i}. [{a['source_name']}] ({date_str}) {a['title']}\n   {desc[:200]}\n"
 
     source_types = list(set(a["source_type"] for a in articles))
 
@@ -337,8 +340,23 @@ def run_llm_analysis(cur, limit: int = 15) -> int:
                         reason=f"from cluster: {cluster['title'][:50]}",
                     )
 
+            # Insert timeline events from LLM response
+            for event in result.get("timeline_events", []):
+                if not event.get("title"):
+                    continue
+                db.insert_timeline_event(
+                    cur,
+                    cluster_id=cluster["id"],
+                    title=event["title"],
+                    description=None,
+                    event_date=event.get("date"),
+                    importance=int(event.get("importance", 5)),
+                )
+            timeline_count = len(result.get("timeline_events", []))
+
             analyzed += 1
-            log.info("Analyzed [%s] cluster #%d: %s", used_provider, rank, cluster["title"][:50])
+            log.info("Analyzed [%s] cluster #%d: %s (%d timeline events)",
+                     used_provider, rank, cluster["title"][:50], timeline_count)
 
     log.info("LLM analysis: %d clusters analyzed", analyzed)
     return analyzed
