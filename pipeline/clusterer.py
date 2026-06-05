@@ -80,7 +80,7 @@ def run_clustering(cur) -> tuple[int, int]:
         if best_similarity >= SAME_THEME_THRESHOLD and best_cluster_id:
             role = "primary" if best_similarity >= SAME_EVENT_THRESHOLD else "supporting"
             db.update_article_cluster(cur, article["id"], best_cluster_id)
-            db.insert_cluster_article(cur, best_cluster_id, article["id"], best_similarity, role)
+            db.insert_cluster_article(cur, best_cluster_id, article["id"], float(best_similarity), role)
 
             cdata = cluster_data[best_cluster_id]
             cdata["article_count"] += 1

@@ -40,7 +40,7 @@ def run_sentiment_analysis(cur, articles: list[dict]) -> int:
         result = model(text)[0]
 
         label = LABEL_MAP.get(result["label"], "neutral")
-        score = round(result["score"], 3)
+        score = float(result["score"])
         db.update_article_sentiment(cur, article["id"], label, score)
         analyzed += 1
 

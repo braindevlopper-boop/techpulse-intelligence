@@ -42,7 +42,7 @@ def classify_article(text: str) -> tuple[str, float]:
     """Classify text into one of the predefined categories."""
     clf = _get_classifier()
     result = clf(text[:500], candidate_labels=LABELS, multi_label=False)
-    return result["labels"][0], round(result["scores"][0], 3)
+    return result["labels"][0], float(result["scores"][0])
 
 
 def run_classification(cur, articles: list[dict]) -> int:

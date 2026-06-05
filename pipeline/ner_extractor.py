@@ -68,7 +68,7 @@ def run_ner(cur, articles: list[dict]) -> int:
             entity_id = db.upsert_entity(cur, ent["name"], ent["type"])
             db.insert_article_entity(
                 cur, article["id"], entity_id,
-                role="mentioned", confidence=ent["score"], source="ner",
+                role="mentioned", confidence=float(ent["score"]), source="ner",
             )
             total += 1
 

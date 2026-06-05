@@ -39,4 +39,5 @@ jobs:
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
           R2_PUBLIC_URL: ${{ secrets.R2_PUBLIC_URL }}
           FIREBASE_SERVER_KEY: ${{ secrets.FIREBASE_SERVER_KEY }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: python -m pipeline
