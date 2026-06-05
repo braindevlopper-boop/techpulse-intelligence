@@ -1,0 +1,48 @@
+name: TechPulse Weekly Report
+
+on:
+  schedule:
+    - cron: '0 20 * * 0'         # Sunday 20h UTC
+  workflow_dispatch: {}
+
+jobs:
+  weekly:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Generate weekly podcast
+        env:
+          NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_PUBLIC_URL: ${{ secrets.R2_PUBLIC_URL }}
+          FIREBASE_SERVER_KEY: ${{ secrets.FIREBASE_SERVER_KEY }}
+        run: |
+          python -c "
+          from pipeline.db import get_cursor
+          from pipeline.podcast_generator import generate_podcast
+          from pipeline.notifier import send_fcm_notification
+
+          with get_cursor() as cur:
+              pid = generate_podcast(cur, podcast_type='weekly')
+              if pid:
+                  send_fcm_notification(
+                      'TechPulse — Résumé de la semaine',
+                      'Ton podcast hebdo est prêt',
+                      {'type': 'weekly_podcast'}
+                  )
+          "
