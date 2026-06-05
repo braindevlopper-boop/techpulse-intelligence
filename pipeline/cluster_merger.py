@@ -11,7 +11,7 @@ import json
 import logging
 
 from . import db
-from .llm_analyzer import analyze_with_deepseek
+from .llm_analyzer import analyze_with_deepseek, analyze_with_gemini
 
 log = logging.getLogger(__name__)
 
@@ -137,29 +137,32 @@ def run_cluster_merging(cur) -> int:
 
     Only processes clusters with 2+ articles to keep the prompt short.
     """
-    # Fetch clusters worth merging (2+ articles)
+    # Only send clusters with 2+ articles to keep prompt short
     cur.execute(
         """
         SELECT id, title, article_count, source_diversity
         FROM clusters
         WHERE status IN ('active', 'growing')
-          AND article_count >= 1
+          AND article_count >= 2
         ORDER BY article_count DESC
-        LIMIT 100
+        LIMIT 60
         """,
     )
     clusters = cur.fetchall()
 
-    if len(clusters) < 5:
-        log.info("Too few clusters for merging (%d)", len(clusters))
+    if len(clusters) < 3:
+        log.info("Too few multi-article clusters for merging (%d)", len(clusters))
         return 0
 
-    log.info("Running LLM cluster merge on %d clusters...", len(clusters))
+    log.info("Running LLM cluster merge on %d clusters (2+ articles)...", len(clusters))
     prompt = build_merge_prompt(clusters)
 
     result = analyze_with_deepseek(prompt, model="deepseek-v4-flash")
     if not result:
-        log.warning("LLM merge failed, skipping")
+        log.info("DeepSeek failed, trying Gemini...")
+        result = analyze_with_gemini(prompt)
+    if not result:
+        log.warning("LLM merge failed on all providers, skipping")
         return 0
 
     merge_groups = result.get("merge_groups", [])
