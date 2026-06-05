@@ -51,13 +51,18 @@ def classify_article(text: str) -> tuple[str, float]:
 
 def run_classification(cur, articles: list[dict]) -> int:
     """Classify articles and store results."""
+    total = len(articles)
     classified = 0
 
-    for article in articles:
+    for i, article in enumerate(articles, 1):
         text = f"{article['title']} {article.get('description', '')}"
         category, confidence = classify_article(text)
         db.update_article_category(cur, article["id"], category, confidence)
         classified += 1
+
+        if i % 20 == 0 or i == total:
+            log.info("Classification: %d/%d (%.0f%%) — last: %s → %s",
+                     i, total, i / total * 100, article["title"][:40], category)
 
     log.info("Classified %d articles", classified)
     return classified

@@ -55,9 +55,10 @@ def extract_entities(text: str) -> list[dict]:
 
 def run_ner(cur, articles: list[dict]) -> int:
     """Run NER on articles and store entities in DB."""
-    total = 0
+    total_entities = 0
+    total_articles = len(articles)
 
-    for article in articles:
+    for i, article in enumerate(articles, 1):
         text = f"{article['title']} {article.get('description', '')} {(article.get('full_text') or '')[:500]}"
         entities = extract_entities(text)
 
@@ -70,7 +71,10 @@ def run_ner(cur, articles: list[dict]) -> int:
                 cur, article["id"], entity_id,
                 role="mentioned", confidence=float(ent["score"]), source="ner",
             )
-            total += 1
+            total_entities += 1
 
-    log.info("Extracted %d entity links from %d articles", total, len(articles))
-    return total
+        if i % 20 == 0 or i == total_articles:
+            log.info("NER: %d/%d (%.0f%%)", i, total_articles, i / total_articles * 100)
+
+    log.info("Extracted %d entity links from %d articles", total_entities, total_articles)
+    return total_entities

@@ -33,9 +33,10 @@ LABEL_MAP = {
 def run_sentiment_analysis(cur, articles: list[dict]) -> int:
     """Analyze sentiment of articles."""
     model = _get_model()
+    total = len(articles)
     analyzed = 0
 
-    for article in articles:
+    for i, article in enumerate(articles, 1):
         text = f"{article['title']} {article.get('description', '')}"[:512]
         result = model(text)[0]
 
@@ -43,6 +44,9 @@ def run_sentiment_analysis(cur, articles: list[dict]) -> int:
         score = float(result["score"])
         db.update_article_sentiment(cur, article["id"], label, score)
         analyzed += 1
+
+        if i % 20 == 0 or i == total:
+            log.info("Sentiment: %d/%d (%.0f%%)", i, total, i / total * 100)
 
     log.info("Analyzed sentiment for %d articles", analyzed)
     return analyzed
