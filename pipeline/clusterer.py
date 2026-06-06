@@ -2,6 +2,7 @@
 
 import logging
 import os
+import re
 import numpy as np
 
 from . import db
@@ -9,9 +10,19 @@ from . import db
 log = logging.getLogger(__name__)
 
 SAME_EVENT_THRESHOLD = float(os.getenv("TECHPULSE_SAME_EVENT_THRESHOLD", "0.84"))
-SAME_THEME_THRESHOLD = float(os.getenv("TECHPULSE_SAME_THEME_THRESHOLD", "0.74"))
+SAME_THEME_THRESHOLD = float(os.getenv("TECHPULSE_SAME_THEME_THRESHOLD", "0.68"))
+LEXICAL_GUARD_THRESHOLD = float(os.getenv("TECHPULSE_LEXICAL_GUARD_THRESHOLD", "0.82"))
 NEW_TOPIC_THRESHOLD = 0.60
 MAX_CLUSTER_SIZE = 12
+
+TITLE_STOPWORDS = {
+    "about", "after", "again", "ahead", "amid", "and", "are", "back", "been",
+    "but", "can", "for", "from", "has", "have", "how", "into", "its", "new",
+    "now", "off", "our", "over", "says", "the", "their", "this", "through",
+    "under", "was", "what", "when", "where", "will", "with", "your",
+    "tech", "technology", "artificial", "intelligence", "models", "model",
+    "company", "companies", "market", "markets", "business", "future",
+}
 
 
 def parse_embedding(embedding_str: str) -> list[float]:
@@ -28,6 +39,31 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
     if norm == 0:
         return 0.0
     return float(dot / norm)
+
+
+def title_tokens(title: str | None) -> set[str]:
+    """Extract distinctive title tokens used as a guard for broad themes."""
+    if not title:
+        return set()
+    tokens = set()
+    for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9.'&-]{1,}", title.lower()):
+        clean = token.strip(".'&-")
+        if len(clean) < 3 or clean in TITLE_STOPWORDS:
+            continue
+        tokens.add(clean)
+    return tokens
+
+
+def passes_lexical_guard(article_title: str | None, cluster_title: str | None,
+                         similarity: float, founder_similarity: float) -> bool:
+    """Avoid merging broad semantic neighbors that do not share title anchors."""
+    if similarity >= LEXICAL_GUARD_THRESHOLD or founder_similarity >= LEXICAL_GUARD_THRESHOLD:
+        return True
+
+    article_tokens = title_tokens(article_title)
+    cluster_tokens = title_tokens(cluster_title)
+    overlap = article_tokens & cluster_tokens
+    return len(overlap) >= 2
 
 
 def run_clustering(cur) -> tuple[int, int]:
@@ -50,6 +86,7 @@ def run_clustering(cur) -> tuple[int, int]:
     for c in clusters:
         if c["centroid_str"]:
             cluster_data[c["id"]] = {
+                "title": c["title"],
                 "centroid": parse_embedding(c["centroid_str"]),
                 "founder_embedding": parse_embedding(c.get("founder_embedding_str") or c["centroid_str"]),
                 "article_count": c["article_count"],
@@ -76,7 +113,9 @@ def run_clustering(cur) -> tuple[int, int]:
             if sim > best_similarity:
                 # Also check similarity with the founding article
                 founder_sim = cosine_similarity(emb, cdata["founder_embedding"])
-                if founder_sim >= SAME_THEME_THRESHOLD:
+                if founder_sim >= SAME_THEME_THRESHOLD and passes_lexical_guard(
+                    article.get("title"), cdata.get("title"), sim, founder_sim
+                ):
                     best_similarity = sim
                     best_cluster_id = cid
 
@@ -115,6 +154,7 @@ def run_clustering(cur) -> tuple[int, int]:
             db.insert_cluster_article(cur, new_id, article["id"], 1.0, "primary")
 
             cluster_data[new_id] = {
+                "title": article["title"][:200],
                 "centroid": emb,
                 "founder_embedding": emb,
                 "article_count": 1,

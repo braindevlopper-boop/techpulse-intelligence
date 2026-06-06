@@ -18,7 +18,7 @@ on:
       same_theme_threshold:
         description: 'BGE-M3 clustering threshold for same theme'
         required: false
-        default: '0.74'
+        default: '0.68'
         type: string
       skip_hf_ml:
         description: 'Skip Hugging Face NER/classification/keywords/sentiment steps'
@@ -79,6 +79,6 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           TECHPULSE_RECLUSTER_ALL: ${{ github.event.inputs.recluster_all || 'false' }}
           TECHPULSE_SKIP_HF_ML: ${{ (github.event.inputs.skip_hf_ml == 'true' || github.event.inputs.recluster_all == 'true') && 'true' || 'false' }}
-          TECHPULSE_SAME_THEME_THRESHOLD: ${{ github.event.inputs.same_theme_threshold || '0.74' }}
+          TECHPULSE_SAME_THEME_THRESHOLD: ${{ github.event.inputs.same_theme_threshold || '0.68' }}
           TECHPULSE_SAME_EVENT_THRESHOLD: "0.84"
         run: python -m pipeline
