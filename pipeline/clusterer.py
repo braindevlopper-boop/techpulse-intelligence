@@ -11,7 +11,6 @@ log = logging.getLogger(__name__)
 
 SAME_EVENT_THRESHOLD = float(os.getenv("TECHPULSE_SAME_EVENT_THRESHOLD", "0.84"))
 SAME_THEME_THRESHOLD = float(os.getenv("TECHPULSE_SAME_THEME_THRESHOLD", "0.68"))
-LEXICAL_GUARD_THRESHOLD = float(os.getenv("TECHPULSE_LEXICAL_GUARD_THRESHOLD", "0.82"))
 NEW_TOPIC_THRESHOLD = 0.60
 MAX_CLUSTER_SIZE = 12
 
@@ -22,6 +21,12 @@ TITLE_STOPWORDS = {
     "under", "was", "what", "when", "where", "will", "with", "your",
     "tech", "technology", "artificial", "intelligence", "models", "model",
     "company", "companies", "market", "markets", "business", "future",
+}
+
+BRAND_TOKENS = {
+    "adyen", "alphabet", "amazon", "anthropic", "apple", "aws", "bloomberg",
+    "deepseek", "google", "meta", "microsoft", "nasa", "nvidia", "openai",
+    "oracle", "spacex", "stripe", "tesla",
 }
 
 
@@ -47,23 +52,33 @@ def title_tokens(title: str | None) -> set[str]:
         return set()
     tokens = set()
     for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9.'&-]{1,}", title.lower()):
-        clean = token.strip(".'&-")
+        clean = token.strip(".'&-").removesuffix("'s")
         if len(clean) < 3 or clean in TITLE_STOPWORDS:
             continue
         tokens.add(clean)
     return tokens
 
 
-def passes_lexical_guard(article_title: str | None, cluster_title: str | None,
+def lexical_anchor_score(article_tokens: set[str], cluster_tokens: set[str]) -> int:
+    score = 0
+    for token in article_tokens & cluster_tokens:
+        score += 1 if token in BRAND_TOKENS else 2
+    return score
+
+
+def passes_lexical_guard(article_title: str | None, cluster_tokens: set[str],
                          similarity: float, founder_similarity: float) -> bool:
     """Avoid merging broad semantic neighbors that do not share title anchors."""
-    if similarity >= LEXICAL_GUARD_THRESHOLD or founder_similarity >= LEXICAL_GUARD_THRESHOLD:
+    if similarity >= SAME_EVENT_THRESHOLD or founder_similarity >= SAME_EVENT_THRESHOLD:
         return True
 
     article_tokens = title_tokens(article_title)
-    cluster_tokens = title_tokens(cluster_title)
-    overlap = article_tokens & cluster_tokens
-    return len(overlap) >= 2
+    anchor_score = lexical_anchor_score(article_tokens, cluster_tokens)
+    if anchor_score >= 2:
+        return True
+
+    has_brand_overlap = bool((article_tokens & cluster_tokens) & BRAND_TOKENS)
+    return has_brand_overlap and max(similarity, founder_similarity) >= 0.74
 
 
 def run_clustering(cur) -> tuple[int, int]:
@@ -87,6 +102,7 @@ def run_clustering(cur) -> tuple[int, int]:
         if c["centroid_str"]:
             cluster_data[c["id"]] = {
                 "title": c["title"],
+                "tokens": title_tokens(c["title"]),
                 "centroid": parse_embedding(c["centroid_str"]),
                 "founder_embedding": parse_embedding(c.get("founder_embedding_str") or c["centroid_str"]),
                 "article_count": c["article_count"],
@@ -114,7 +130,7 @@ def run_clustering(cur) -> tuple[int, int]:
                 # Also check similarity with the founding article
                 founder_sim = cosine_similarity(emb, cdata["founder_embedding"])
                 if founder_sim >= SAME_THEME_THRESHOLD and passes_lexical_guard(
-                    article.get("title"), cdata.get("title"), sim, founder_sim
+                    article.get("title"), cdata.get("tokens", set()), sim, founder_sim
                 ):
                     best_similarity = sim
                     best_cluster_id = cid
@@ -127,6 +143,7 @@ def run_clustering(cur) -> tuple[int, int]:
             cdata = cluster_data[best_cluster_id]
             cdata["article_count"] += 1
             cdata["source_names"].add(article["source_name"])
+            cdata["tokens"].update(title_tokens(article.get("title")))
 
             # Update centroid (slow drift — weighted toward founder)
             count = cdata["article_count"]
@@ -155,6 +172,7 @@ def run_clustering(cur) -> tuple[int, int]:
 
             cluster_data[new_id] = {
                 "title": article["title"][:200],
+                "tokens": title_tokens(article.get("title")),
                 "centroid": emb,
                 "founder_embedding": emb,
                 "article_count": 1,
