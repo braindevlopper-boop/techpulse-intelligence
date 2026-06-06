@@ -1,14 +1,15 @@
 """Clustering engine using pgvector similarity in Neon."""
 
 import logging
+import os
 import numpy as np
 
 from . import db
 
 log = logging.getLogger(__name__)
 
-SAME_EVENT_THRESHOLD = 0.88
-SAME_THEME_THRESHOLD = 0.82
+SAME_EVENT_THRESHOLD = float(os.getenv("TECHPULSE_SAME_EVENT_THRESHOLD", "0.84"))
+SAME_THEME_THRESHOLD = float(os.getenv("TECHPULSE_SAME_THEME_THRESHOLD", "0.74"))
 NEW_TOPIC_THRESHOLD = 0.60
 MAX_CLUSTER_SIZE = 12
 
@@ -50,7 +51,7 @@ def run_clustering(cur) -> tuple[int, int]:
         if c["centroid_str"]:
             cluster_data[c["id"]] = {
                 "centroid": parse_embedding(c["centroid_str"]),
-                "founder_embedding": parse_embedding(c["centroid_str"]),
+                "founder_embedding": parse_embedding(c.get("founder_embedding_str") or c["centroid_str"]),
                 "article_count": c["article_count"],
                 "source_names": set(c.get("source_names") or []),
             }

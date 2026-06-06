@@ -113,6 +113,49 @@ def fetch_articles_for_sentiment(cur, limit: int = 300) -> list[dict]:
     return cur.fetchall()
 
 
+def reset_clusters_for_rebuild(cur) -> dict:
+    """Drop cluster-derived data and mark embedded articles for reclustering."""
+    cur.execute("DELETE FROM trend_snapshots WHERE cluster_id IS NOT NULL")
+    trend_snapshots = cur.rowcount
+
+    cur.execute("DELETE FROM timeline_events")
+    timeline_events = cur.rowcount
+
+    cur.execute(
+        """
+        DELETE FROM ai_analyses
+        WHERE target_type = 'cluster'
+           OR (target_type = 'daily_digest' AND target_id = 'weak_signals')
+        """
+    )
+    analyses = cur.rowcount
+
+    cur.execute("DELETE FROM cluster_articles")
+    cluster_articles = cur.rowcount
+
+    cur.execute("DELETE FROM clusters")
+    clusters = cur.rowcount
+
+    cur.execute(
+        """
+        UPDATE articles
+        SET cluster_id = NULL,
+            status = 'processed'
+        WHERE embedding IS NOT NULL
+        """
+    )
+    articles_reset = cur.rowcount
+
+    return {
+        "trend_snapshots": trend_snapshots,
+        "timeline_events": timeline_events,
+        "analyses": analyses,
+        "cluster_articles": cluster_articles,
+        "clusters": clusters,
+        "articles_reset": articles_reset,
+    }
+
+
 def update_article_category(cur, article_id: str, category: str, confidence: float):
     cur.execute(
         "UPDATE articles SET category = %s, category_confidence = %s WHERE id = %s",
@@ -129,6 +172,10 @@ def update_article_sentiment(cur, article_id: str, sentiment: str, score: float)
 
 def update_article_cluster(cur, article_id: str, cluster_id: str):
     cur.execute(
+        "DELETE FROM cluster_articles WHERE article_id = %s",
+        (article_id,),
+    )
+    cur.execute(
         "UPDATE articles SET cluster_id = %s, status = 'clustered' WHERE id = %s",
         (cluster_id, article_id),
     )
@@ -142,6 +189,16 @@ def fetch_active_clusters(cur) -> list[dict]:
         """
         SELECT c.id, c.title, c.centroid::text as centroid_str,
                c.article_count, c.source_diversity, c.importance_score,
+               (
+                 SELECT fa.embedding::text
+                 FROM cluster_articles fca
+                 JOIN articles fa ON fa.id = fca.article_id
+                 WHERE fca.cluster_id = c.id AND fa.embedding IS NOT NULL
+                 ORDER BY (fca.role = 'primary') DESC,
+                          fca.similarity_score DESC NULLS LAST,
+                          fca.created_at ASC
+                 LIMIT 1
+               ) AS founder_embedding_str,
                COALESCE(
                  ARRAY_AGG(DISTINCT a.source_name) FILTER (WHERE a.source_name IS NOT NULL),
                  ARRAY[]::text[]
@@ -154,6 +211,101 @@ def fetch_active_clusters(cur) -> list[dict]:
         """
     )
     return cur.fetchall()
+
+
+def repair_cluster_integrity(cur) -> dict:
+    """Repair cluster/article links before scoring or reclustering.
+
+    The article table has a single cluster_id, so cluster_articles must follow
+    the same rule. This prevents old links from previous runs from inflating
+    cluster counts or leaving empty clusters active.
+    """
+    cur.execute(
+        """
+        WITH ranked AS (
+          SELECT ca.id,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY ca.article_id
+                   ORDER BY (ca.cluster_id = a.cluster_id) DESC,
+                            ca.similarity_score DESC NULLS LAST,
+                            ca.created_at DESC
+                 ) AS rn
+          FROM cluster_articles ca
+          JOIN articles a ON a.id = ca.article_id
+        )
+        DELETE FROM cluster_articles ca
+        USING ranked r
+        WHERE ca.id = r.id AND r.rn > 1
+        """
+    )
+    duplicate_links = cur.rowcount
+
+    cur.execute(
+        """
+        DELETE FROM cluster_articles ca
+        USING articles a
+        WHERE ca.article_id = a.id
+          AND a.cluster_id IS NOT NULL
+          AND ca.cluster_id <> a.cluster_id
+        """
+    )
+    stale_links = cur.rowcount
+
+    cur.execute(
+        """
+        INSERT INTO cluster_articles (id, cluster_id, article_id, similarity_score, role)
+        SELECT md5(a.cluster_id || ':' || a.id), a.cluster_id, a.id, 1.0, 'primary'
+        FROM articles a
+        WHERE a.cluster_id IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1
+            FROM cluster_articles ca
+            WHERE ca.article_id = a.id AND ca.cluster_id = a.cluster_id
+          )
+        ON CONFLICT (cluster_id, article_id) DO NOTHING
+        """
+    )
+    missing_links = cur.rowcount
+
+    cur.execute(
+        """
+        DELETE FROM clusters c
+        WHERE c.status IN ('active', 'growing', 'peak')
+          AND NOT EXISTS (
+            SELECT 1 FROM cluster_articles ca WHERE ca.cluster_id = c.id
+          )
+        """
+    )
+    empty_clusters = cur.rowcount
+
+    cur.execute(
+        """
+        WITH stats AS (
+          SELECT ca.cluster_id,
+                 COUNT(*) AS article_count,
+                 COUNT(DISTINCT a.source_name) FILTER (WHERE a.source_name IS NOT NULL) AS source_diversity,
+                 MAX(a.published_at) AS latest_article_at
+          FROM cluster_articles ca
+          JOIN articles a ON a.id = ca.article_id
+          GROUP BY ca.cluster_id
+        )
+        UPDATE clusters c
+        SET article_count = stats.article_count,
+            source_diversity = COALESCE(stats.source_diversity, 0),
+            last_updated_at = COALESCE(stats.latest_article_at, c.last_updated_at, NOW())
+        FROM stats
+        WHERE c.id = stats.cluster_id
+        """
+    )
+    updated_clusters = cur.rowcount
+
+    return {
+        "duplicate_links": duplicate_links,
+        "stale_links": stale_links,
+        "missing_links": missing_links,
+        "empty_clusters": empty_clusters,
+        "updated_clusters": updated_clusters,
+    }
 
 
 def create_cluster(cur, cluster_id: str, title: str, centroid: list[float]):

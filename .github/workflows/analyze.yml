@@ -5,7 +5,21 @@ on:
     types: [ingest_complete]
   schedule:
     - cron: '0 7,13,19 * * *'    # Fallback: 1h after ingest
-  workflow_dispatch: {}            # Manual trigger
+  workflow_dispatch:
+    inputs:
+      recluster_all:
+        description: 'Rebuild all clusters from existing 1024-dim embeddings'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+      same_theme_threshold:
+        description: 'BGE-M3 clustering threshold for same theme'
+        required: false
+        default: '0.74'
+        type: string
 
 jobs:
   analyze:
@@ -54,4 +68,7 @@ jobs:
           R2_PUBLIC_URL: ${{ secrets.R2_PUBLIC_URL }}
           FIREBASE_SERVER_KEY: ${{ secrets.FIREBASE_SERVER_KEY }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          TECHPULSE_RECLUSTER_ALL: ${{ github.event.inputs.recluster_all || 'false' }}
+          TECHPULSE_SAME_THEME_THRESHOLD: ${{ github.event.inputs.same_theme_threshold || '0.74' }}
+          TECHPULSE_SAME_EVENT_THRESHOLD: "0.84"
         run: python -m pipeline

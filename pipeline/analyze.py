@@ -14,6 +14,7 @@ Steps:
 """
 
 import logging
+import os
 import sys
 
 from . import db
@@ -37,6 +38,10 @@ logging.basicConfig(
 log = logging.getLogger("intelligence")
 
 
+def should_recluster_all() -> bool:
+    return os.getenv("TECHPULSE_RECLUSTER_ALL", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def run():
     log.info("=" * 60)
     log.info("TechPulse Intelligence Pipeline — Starting")
@@ -54,6 +59,12 @@ def run():
     }
 
     try:
+        if should_recluster_all():
+            log.warning("TECHPULSE_RECLUSTER_ALL enabled: rebuilding all cluster-derived data")
+            with db.get_cursor() as cur:
+                reset_stats = db.reset_clusters_for_rebuild(cur)
+                log.warning("Cluster rebuild reset: %s", reset_stats)
+
         # ── Step 1: NER ──
         log.info("Step 1: Extracting entities (NER)...")
         with db.get_cursor() as cur:
@@ -85,6 +96,8 @@ def run():
         # ── Step 5: Clustering ──
         log.info("Step 5: Clustering articles...")
         with db.get_cursor() as cur:
+            repair_stats = db.repair_cluster_integrity(cur)
+            log.info("Cluster integrity before clustering: %s", repair_stats)
             created, updated = run_clustering(cur)
             stats["clusters_created"] = created
             stats["clusters_updated"] = updated
@@ -93,7 +106,9 @@ def run():
         log.info("Step 5b: Merging similar clusters (LLM)...")
         with db.get_cursor() as cur:
             merged = run_cluster_merging(cur)
+            repair_stats = db.repair_cluster_integrity(cur)
             log.info("Merged %d cluster groups", merged)
+            log.info("Cluster integrity after merging: %s", repair_stats)
 
         # ── Step 6: Scoring ──
         log.info("Step 6: Scoring clusters...")
