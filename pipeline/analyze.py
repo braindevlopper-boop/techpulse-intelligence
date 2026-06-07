@@ -65,36 +65,9 @@ def run():
                 reset_stats = db.reset_clusters_for_rebuild(cur)
                 log.warning("Cluster rebuild reset: %s", reset_stats)
 
-        # ── Step 1: NER ──
-        log.info("Step 1: Extracting entities (NER)...")
-        with db.get_cursor() as cur:
-            articles_ner = db.fetch_articles_for_ner(cur)
-            if articles_ner:
-                run_ner(cur, articles_ner)
-
-        # ── Step 2: Classification ──
-        log.info("Step 2: Classifying articles (zero-shot)...")
-        with db.get_cursor() as cur:
-            articles_cls = db.fetch_articles_for_classification(cur)
-            if articles_cls:
-                run_classification(cur, articles_cls)
-
-        # ── Step 3: KeyBERT ──
-        log.info("Step 3: Extracting keywords (KeyBERT)...")
-        with db.get_cursor() as cur:
-            articles_kw = db.fetch_articles_for_keywords(cur)
-            if articles_kw:
-                run_keyword_extraction(cur, articles_kw)
-
-        # ── Step 4: Sentiment ──
-        log.info("Step 4: Analyzing sentiment...")
-        with db.get_cursor() as cur:
-            articles_sent = db.fetch_articles_for_sentiment(cur)
-            if articles_sent:
-                run_sentiment_analysis(cur, articles_sent)
-
-        # ── Step 5: Clustering ──
-        log.info("Step 5: Clustering articles...")
+        # ── Step 1: Clustering ──
+        # Keep the core veille product path before optional HF enrichments.
+        log.info("Step 1: Clustering articles...")
         with db.get_cursor() as cur:
             repair_stats = db.repair_cluster_integrity(cur)
             log.info("Cluster integrity before clustering: %s", repair_stats)
@@ -102,43 +75,71 @@ def run():
             stats["clusters_created"] = created
             stats["clusters_updated"] = updated
 
-        # ── Step 5b: LLM cluster merging (Pass 2) ──
-        log.info("Step 5b: Merging similar clusters (LLM)...")
+        # ── Step 2: LLM cluster merging (Pass 2) ──
+        log.info("Step 2: Merging similar clusters (LLM)...")
         with db.get_cursor() as cur:
             merged = run_cluster_merging(cur)
             repair_stats = db.repair_cluster_integrity(cur)
             log.info("Merged %d cluster groups", merged)
             log.info("Cluster integrity after merging: %s", repair_stats)
 
-        # ── Step 6: Scoring ──
-        log.info("Step 6: Scoring clusters...")
+        # ── Step 3: Scoring ──
+        log.info("Step 3: Scoring clusters...")
         with db.get_cursor() as cur:
             run_scoring(cur)
 
-        # ── Step 7: LLM Analysis ──
-        log.info("Step 7: Running LLM analysis on top clusters...")
+        # ── Step 4: LLM Analysis ──
+        log.info("Step 4: Running LLM analysis on top clusters...")
         with db.get_cursor() as cur:
             analyses = run_llm_analysis(cur, limit=15)
             stats["analyses_generated"] = analyses
 
-        # ── Step 8: Weak signals (rule-based detection) ──
-        log.info("Step 8: Detecting weak signals...")
+        # ── Step 5: Weak signals (rule-based detection) ──
+        log.info("Step 5: Detecting weak signals...")
         with db.get_cursor() as cur:
             signals = detect_weak_signals(cur)
             for signal in signals[:3]:
                 notify_weak_signal(signal["title"], signal["growth_score"])
 
-        # ── Step 8b: Grok deep signal analysis (1x/day, premium) ──
-        log.info("Step 8b: Running Grok deep signal analysis...")
+        # ── Step 6: Grok deep signal analysis (1x/day, premium) ──
+        log.info("Step 6: Running Grok deep signal analysis...")
         with db.get_cursor() as cur:
             run_weak_signal_analysis(cur)
 
-        # ── Step 9: Podcast ──
-        log.info("Step 9: Generating podcast...")
+        # ── Step 7: Podcast ──
+        log.info("Step 7: Generating podcast...")
         with db.get_cursor() as cur:
             generate_podcast(cur)
 
-        # ── Step 10: Finalize + Notify ──
+        # ── Step 8: NER ──
+        log.info("Step 8: Extracting entities (NER)...")
+        with db.get_cursor() as cur:
+            articles_ner = db.fetch_articles_for_ner(cur)
+            if articles_ner:
+                run_ner(cur, articles_ner)
+
+        # ── Step 9: Classification ──
+        log.info("Step 9: Classifying articles (zero-shot)...")
+        with db.get_cursor() as cur:
+            articles_cls = db.fetch_articles_for_classification(cur)
+            if articles_cls:
+                run_classification(cur, articles_cls)
+
+        # ── Step 10: KeyBERT ──
+        log.info("Step 10: Extracting keywords (KeyBERT)...")
+        with db.get_cursor() as cur:
+            articles_kw = db.fetch_articles_for_keywords(cur)
+            if articles_kw:
+                run_keyword_extraction(cur, articles_kw)
+
+        # ── Step 11: Sentiment ──
+        log.info("Step 11: Analyzing sentiment...")
+        with db.get_cursor() as cur:
+            articles_sent = db.fetch_articles_for_sentiment(cur)
+            if articles_sent:
+                run_sentiment_analysis(cur, articles_sent)
+
+        # ── Step 12: Finalize + Notify ──
         with db.get_cursor() as cur:
             db.complete_pipeline_run(cur, run_id, stats)
 
