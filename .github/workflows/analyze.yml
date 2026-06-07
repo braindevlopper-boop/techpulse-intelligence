@@ -28,6 +28,14 @@ on:
         options:
           - 'false'
           - 'true'
+      refresh_hf_cache:
+        description: 'Download missing Hugging Face models and upload them to R2 cache'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
 
 jobs:
   analyze:
@@ -61,6 +69,13 @@ jobs:
         if: ${{ github.event.inputs.recluster_all != 'true' && github.event.inputs.skip_hf_ml != 'true' }}
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_HUB_OFFLINE: ${{ github.event.inputs.refresh_hf_cache == 'true' && '0' || '1' }}
+          TECHPULSE_HF_DOWNLOAD_MISSING: ${{ github.event.inputs.refresh_hf_cache == 'true' && 'true' || 'false' }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          HF_R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          HF_R2_PREFIX: hf-model-cache/v1
         run: python -m pipeline.hf_preload
 
       - name: Run intelligence pipeline
@@ -77,8 +92,10 @@ jobs:
           R2_PUBLIC_URL: ${{ secrets.R2_PUBLIC_URL }}
           FIREBASE_SERVER_KEY: ${{ secrets.FIREBASE_SERVER_KEY }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_HUB_OFFLINE: ${{ github.event.inputs.skip_hf_ml != 'true' && '1' || '0' }}
           TECHPULSE_RECLUSTER_ALL: ${{ github.event.inputs.recluster_all || 'false' }}
           TECHPULSE_SKIP_HF_ML: ${{ (github.event.inputs.skip_hf_ml == 'true' || github.event.inputs.recluster_all == 'true') && 'true' || 'false' }}
+          TECHPULSE_ALLOW_HF_FAILURE: "true"
           TECHPULSE_SAME_THEME_THRESHOLD: ${{ github.event.inputs.same_theme_threshold || '0.68' }}
           TECHPULSE_SAME_EVENT_THRESHOLD: "0.84"
         run: python -m pipeline

@@ -1,16 +1,14 @@
 """Main intelligence pipeline — entry point for GitHub Actions.
 
 Steps:
-  1. NER — extract entities from articles
-  2. Classification — zero-shot categorization
-  3. KeyBERT — extract keywords
-  4. Sentiment — analyze article/comment sentiment
-  5. Clustering — group articles by similarity (pgvector)
-  6. Scoring — compute importance, growth, novelty
-  7. LLM Analysis — analyze top clusters with Gemini/OpenAI
-  8. Weak signals — detect emerging topics
-  9. Podcast — generate daily audio (Edge TTS)
-  10. Notifications — push via FCM
+  1. Clustering — group articles by similarity (pgvector)
+  2. Cluster merging — merge duplicate stories
+  3. Scoring — compute importance, growth, novelty
+  4. LLM Analysis — analyze top clusters with Gemini/OpenAI
+  5. Weak signals — detect emerging topics
+  6. Podcast — generate daily audio (Edge TTS)
+  7. Notifications — push via FCM
+  8. Optional HF enrichments — NER, classification, keywords, sentiment
 """
 
 import logging
@@ -40,6 +38,13 @@ log = logging.getLogger("intelligence")
 
 def should_recluster_all() -> bool:
     return os.getenv("TECHPULSE_RECLUSTER_ALL", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def run_optional_enrichment(step_name: str, fn) -> None:
+    try:
+        fn()
+    except Exception as exc:
+        log.warning("%s skipped after failure: %s", step_name, exc, exc_info=True)
 
 
 def run():
@@ -111,43 +116,45 @@ def run():
         with db.get_cursor() as cur:
             generate_podcast(cur)
 
-        # ── Step 8: NER ──
-        log.info("Step 8: Extracting entities (NER)...")
-        with db.get_cursor() as cur:
-            articles_ner = db.fetch_articles_for_ner(cur)
-            if articles_ner:
-                run_ner(cur, articles_ner)
-
-        # ── Step 9: Classification ──
-        log.info("Step 9: Classifying articles (zero-shot)...")
-        with db.get_cursor() as cur:
-            articles_cls = db.fetch_articles_for_classification(cur)
-            if articles_cls:
-                run_classification(cur, articles_cls)
-
-        # ── Step 10: KeyBERT ──
-        log.info("Step 10: Extracting keywords (KeyBERT)...")
-        with db.get_cursor() as cur:
-            articles_kw = db.fetch_articles_for_keywords(cur)
-            if articles_kw:
-                run_keyword_extraction(cur, articles_kw)
-
-        # ── Step 11: Sentiment ──
-        log.info("Step 11: Analyzing sentiment...")
-        with db.get_cursor() as cur:
-            articles_sent = db.fetch_articles_for_sentiment(cur)
-            if articles_sent:
-                run_sentiment_analysis(cur, articles_sent)
-
-        # ── Step 12: Finalize + Notify ──
+        # ── Step 8: Finalize + Notify ──
         with db.get_cursor() as cur:
             db.complete_pipeline_run(cur, run_id, stats)
 
         notify_pipeline_complete(stats)
 
         log.info("=" * 60)
-        log.info("Intelligence pipeline complete: %s", stats)
+        log.info("Core intelligence pipeline complete: %s", stats)
         log.info("=" * 60)
+
+        def enrich_ner():
+            with db.get_cursor() as cur:
+                articles_ner = db.fetch_articles_for_ner(cur)
+                if articles_ner:
+                    run_ner(cur, articles_ner)
+
+        def enrich_classification():
+            with db.get_cursor() as cur:
+                articles_cls = db.fetch_articles_for_classification(cur)
+                if articles_cls:
+                    run_classification(cur, articles_cls)
+
+        def enrich_keywords():
+            with db.get_cursor() as cur:
+                articles_kw = db.fetch_articles_for_keywords(cur)
+                if articles_kw:
+                    run_keyword_extraction(cur, articles_kw)
+
+        def enrich_sentiment():
+            with db.get_cursor() as cur:
+                articles_sent = db.fetch_articles_for_sentiment(cur)
+                if articles_sent:
+                    run_sentiment_analysis(cur, articles_sent)
+
+        log.info("Step 9: Optional Hugging Face enrichments...")
+        run_optional_enrichment("NER", enrich_ner)
+        run_optional_enrichment("Classification", enrich_classification)
+        run_optional_enrichment("Keyword extraction", enrich_keywords)
+        run_optional_enrichment("Sentiment", enrich_sentiment)
 
     except Exception as e:
         log.error("Pipeline failed: %s", e, exc_info=True)
