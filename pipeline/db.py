@@ -176,7 +176,16 @@ def update_article_cluster(cur, article_id: str, cluster_id: str):
         (article_id,),
     )
     cur.execute(
-        "UPDATE articles SET cluster_id = %s, status = 'clustered' WHERE id = %s",
+        """
+        UPDATE articles
+        SET cluster_id = %s,
+            status = 'clustered',
+            pipeline_status = 'clustered',
+            clustering_status = 'clustered',
+            last_error = NULL,
+            last_processed_at = NOW()
+        WHERE id = %s
+        """,
         (cluster_id, article_id),
     )
 
@@ -479,6 +488,21 @@ def insert_analysis(cur, target_type: str, target_id: str,
         (gen_id(), target_type, target_id, provider, model,
          analysis_type, json.dumps(content), tokens, cost),
     )
+    if target_type == "cluster":
+        cur.execute(
+            """
+            UPDATE articles a
+            SET status = CASE WHEN a.status = 'clustered' THEN 'analyzed' ELSE a.status END,
+                pipeline_status = 'analyzed',
+                analysis_status = 'analyzed',
+                last_error = NULL,
+                last_processed_at = NOW()
+            FROM cluster_articles ca
+            WHERE ca.article_id = a.id
+              AND ca.cluster_id = %s
+            """,
+            (target_id,),
+        )
 
 
 # ── Timeline events ──
