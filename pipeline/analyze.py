@@ -46,6 +46,10 @@ def should_skip_hf_ml() -> bool:
     return os.getenv("TECHPULSE_SKIP_HF_ML", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def should_skip_legacy_podcast() -> bool:
+    return os.getenv("TECHPULSE_SKIP_LEGACY_PODCAST", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def run_optional_enrichment(step_name: str, fn) -> None:
     try:
         fn()
@@ -124,9 +128,12 @@ def run():
             run_weak_signal_analysis(cur)
 
         # ── Step 8: Podcast ──
-        log.info("Step 8: Generating podcast...")
-        with db.get_cursor() as cur:
-            generate_podcast(cur)
+        if should_skip_legacy_podcast():
+            log.info("Step 8: Legacy intelligence podcast skipped")
+        else:
+            log.info("Step 8: Generating podcast...")
+            with db.get_cursor() as cur:
+                generate_podcast(cur)
 
         # ── Step 9: Finalize + Notify ──
         with db.get_cursor() as cur:
