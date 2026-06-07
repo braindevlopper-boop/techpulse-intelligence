@@ -37,11 +37,39 @@ def fetch_processed_articles(cur, limit: int = 500) -> list[dict]:
     """Articles with embeddings but not yet clustered."""
     cur.execute(
         """
-        SELECT id, title, description, full_text, source_type, source_name,
-               published_at, external_score, embedding::text as embedding_str
-        FROM articles
-        WHERE status = 'processed' AND embedding IS NOT NULL
-        ORDER BY fetched_at DESC
+        SELECT a.id, a.title, a.description, a.full_text, a.source_type, a.source_name,
+               a.published_at, a.external_score, a.embedding::text as embedding_str,
+               a.category, a.sentiment,
+               ai.canonical_title, ai.primary_domain, ai.topic, ai.subtopics,
+               ai.event_fingerprint, ai.entities, ai.keywords, ai.tags,
+               ai.quality_score, ai.relevance_score, ai.should_cluster,
+               ai.cluster_hint
+        FROM articles a
+        LEFT JOIN article_intelligence ai ON ai.article_id = a.id
+        WHERE a.status = 'processed'
+          AND a.embedding IS NOT NULL
+          AND COALESCE(ai.should_cluster, true) = true
+        ORDER BY a.fetched_at DESC
+        LIMIT %s
+        """,
+        (limit,),
+    )
+    return cur.fetchall()
+
+
+def fetch_articles_for_llm_intelligence(cur, limit: int = 40) -> list[dict]:
+    """Embedded articles that still need structured LLM metadata."""
+    cur.execute(
+        """
+        SELECT a.id, a.title, a.description, a.full_text, a.source_name,
+               a.source_type, a.published_at, a.external_score, a.url
+        FROM articles a
+        LEFT JOIN article_intelligence ai ON ai.article_id = a.id
+        WHERE a.embedding IS NOT NULL
+          AND a.status IN ('processed', 'clustered', 'analyzed')
+          AND ai.article_id IS NULL
+          AND COALESCE(a.llm_enrichment_status, 'pending') <> 'failed'
+        ORDER BY a.fetched_at DESC
         LIMIT %s
         """,
         (limit,),
@@ -170,6 +198,20 @@ def update_article_sentiment(cur, article_id: str, sentiment: str, score: float)
     )
 
 
+def mark_article_llm_failed(cur, article_id: str, error: str):
+    cur.execute(
+        """
+        UPDATE articles
+        SET llm_enrichment_status = 'failed',
+            last_error = %s,
+            retry_count = COALESCE(retry_count, 0) + 1,
+            last_processed_at = NOW()
+        WHERE id = %s
+        """,
+        (error[:500], article_id),
+    )
+
+
 def update_article_cluster(cur, article_id: str, cluster_id: str):
     cur.execute(
         "DELETE FROM cluster_articles WHERE article_id = %s",
@@ -211,9 +253,26 @@ def fetch_active_clusters(cur) -> list[dict]:
                COALESCE(
                  ARRAY_AGG(DISTINCT a.source_name) FILTER (WHERE a.source_name IS NOT NULL),
                  ARRAY[]::text[]
-               ) AS source_names
+               ) AS source_names,
+               COALESCE(
+                 ARRAY_AGG(DISTINCT ai.primary_domain) FILTER (WHERE ai.primary_domain IS NOT NULL),
+                 ARRAY[]::text[]
+               ) AS primary_domains,
+               COALESCE(
+                 ARRAY_AGG(DISTINCT ai.topic) FILTER (WHERE ai.topic IS NOT NULL),
+                 ARRAY[]::text[]
+               ) AS topics,
+               COALESCE(
+                 ARRAY_AGG(DISTINCT ai.event_fingerprint) FILTER (WHERE ai.event_fingerprint IS NOT NULL),
+                 ARRAY[]::text[]
+               ) AS event_fingerprints,
+               COALESCE(
+                 ARRAY_AGG(DISTINCT ai.cluster_hint) FILTER (WHERE ai.cluster_hint IS NOT NULL),
+                 ARRAY[]::text[]
+               ) AS cluster_hints
         FROM clusters c
         LEFT JOIN articles a ON a.cluster_id = c.id
+        LEFT JOIN article_intelligence ai ON ai.article_id = a.id
         WHERE c.status IN ('active', 'growing')
         GROUP BY c.id
         ORDER BY c.last_updated_at DESC
@@ -456,6 +515,134 @@ def insert_article_entity(cur, article_id: str, entity_id: str,
     )
 
 
+def upsert_article_intelligence(cur, article_id: str, provider: str, model: str,
+                                content: dict):
+    cur.execute(
+        """
+        INSERT INTO article_intelligence (
+          id, article_id, model_provider, model_name, language,
+          canonical_title, summary, article_type, primary_domain, topic,
+          subtopics, event_fingerprint, event_date, entities, companies,
+          people, products, sectors, countries, keywords, tags, sentiment,
+          sentiment_score, tech_impact, business_impact, finance_impact,
+          market_impact, quality_score, relevance_score, novelty_score,
+          time_sensitivity, should_cluster, cluster_hint, confidence, raw,
+          updated_at
+        )
+        VALUES (
+          %(id)s, %(article_id)s, %(provider)s, %(model)s, %(language)s,
+          %(canonical_title)s, %(summary)s, %(article_type)s, %(primary_domain)s,
+          %(topic)s, %(subtopics)s::jsonb, %(event_fingerprint)s, %(event_date)s::date,
+          %(entities)s::jsonb, %(companies)s::jsonb, %(people)s::jsonb,
+          %(products)s::jsonb, %(sectors)s::jsonb, %(countries)s::jsonb,
+          %(keywords)s::jsonb, %(tags)s::jsonb, %(sentiment)s, %(sentiment_score)s,
+          %(tech_impact)s, %(business_impact)s, %(finance_impact)s,
+          %(market_impact)s, %(quality_score)s, %(relevance_score)s,
+          %(novelty_score)s, %(time_sensitivity)s, %(should_cluster)s,
+          %(cluster_hint)s, %(confidence)s, %(raw)s::jsonb, NOW()
+        )
+        ON CONFLICT (article_id) DO UPDATE SET
+          model_provider = EXCLUDED.model_provider,
+          model_name = EXCLUDED.model_name,
+          language = EXCLUDED.language,
+          canonical_title = EXCLUDED.canonical_title,
+          summary = EXCLUDED.summary,
+          article_type = EXCLUDED.article_type,
+          primary_domain = EXCLUDED.primary_domain,
+          topic = EXCLUDED.topic,
+          subtopics = EXCLUDED.subtopics,
+          event_fingerprint = EXCLUDED.event_fingerprint,
+          event_date = EXCLUDED.event_date,
+          entities = EXCLUDED.entities,
+          companies = EXCLUDED.companies,
+          people = EXCLUDED.people,
+          products = EXCLUDED.products,
+          sectors = EXCLUDED.sectors,
+          countries = EXCLUDED.countries,
+          keywords = EXCLUDED.keywords,
+          tags = EXCLUDED.tags,
+          sentiment = EXCLUDED.sentiment,
+          sentiment_score = EXCLUDED.sentiment_score,
+          tech_impact = EXCLUDED.tech_impact,
+          business_impact = EXCLUDED.business_impact,
+          finance_impact = EXCLUDED.finance_impact,
+          market_impact = EXCLUDED.market_impact,
+          quality_score = EXCLUDED.quality_score,
+          relevance_score = EXCLUDED.relevance_score,
+          novelty_score = EXCLUDED.novelty_score,
+          time_sensitivity = EXCLUDED.time_sensitivity,
+          should_cluster = EXCLUDED.should_cluster,
+          cluster_hint = EXCLUDED.cluster_hint,
+          confidence = EXCLUDED.confidence,
+          raw = EXCLUDED.raw,
+          updated_at = NOW()
+        """,
+        {
+            "id": gen_id(),
+            "article_id": article_id,
+            "provider": provider,
+            "model": model,
+            "language": content.get("language"),
+            "canonical_title": content.get("canonical_title"),
+            "summary": content.get("summary"),
+            "article_type": content.get("article_type"),
+            "primary_domain": content.get("primary_domain"),
+            "topic": content.get("topic"),
+            "subtopics": json.dumps(content.get("subtopics") or []),
+            "event_fingerprint": content.get("event_fingerprint"),
+            "event_date": content.get("event_date"),
+            "entities": json.dumps(content.get("entities") or []),
+            "companies": json.dumps(content.get("companies") or []),
+            "people": json.dumps(content.get("people") or []),
+            "products": json.dumps(content.get("products") or []),
+            "sectors": json.dumps(content.get("sectors") or []),
+            "countries": json.dumps(content.get("countries") or []),
+            "keywords": json.dumps(content.get("keywords") or []),
+            "tags": json.dumps(content.get("tags") or []),
+            "sentiment": content.get("sentiment"),
+            "sentiment_score": content.get("sentiment_score"),
+            "tech_impact": content.get("tech_impact"),
+            "business_impact": content.get("business_impact"),
+            "finance_impact": content.get("finance_impact"),
+            "market_impact": content.get("market_impact"),
+            "quality_score": content.get("quality_score"),
+            "relevance_score": content.get("relevance_score"),
+            "novelty_score": content.get("novelty_score"),
+            "time_sensitivity": content.get("time_sensitivity"),
+            "should_cluster": content.get("should_cluster", True),
+            "cluster_hint": content.get("cluster_hint"),
+            "confidence": content.get("confidence"),
+            "raw": json.dumps(content),
+        },
+    )
+
+    cur.execute(
+        """
+        UPDATE articles
+        SET category = COALESCE(%s, category),
+            category_confidence = COALESCE(%s, category_confidence),
+            sentiment = COALESCE(%s, sentiment),
+            sentiment_score = COALESCE(%s, sentiment_score),
+            language = COALESCE(%s, language),
+            llm_enrichment_status = 'enriched',
+            llm_enriched_at = NOW(),
+            llm_enrichment_model = %s,
+            last_error = NULL,
+            last_processed_at = NOW()
+        WHERE id = %s
+        """,
+        (
+            content.get("primary_domain"),
+            content.get("confidence"),
+            content.get("sentiment"),
+            content.get("sentiment_score"),
+            content.get("language"),
+            f"{provider}:{model}",
+            article_id,
+        ),
+    )
+
+
 # ── Keywords ──
 
 def upsert_keyword(cur, keyword: str, category: str, source: str = "keybert",
@@ -580,6 +767,7 @@ def complete_pipeline_run(cur, run_id: str, stats: dict):
             completed_at = NOW(),
             articles_fetched = %(articles_fetched)s,
             articles_embedded = %(articles_embedded)s,
+            articles_enriched = %(articles_enriched)s,
             clusters_created = %(clusters_created)s,
             clusters_updated = %(clusters_updated)s,
             analyses_generated = %(analyses_generated)s,

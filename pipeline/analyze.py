@@ -1,14 +1,15 @@
 """Main intelligence pipeline — entry point for GitHub Actions.
 
 Steps:
-  1. Clustering — group articles by similarity (pgvector)
-  2. Cluster merging — merge duplicate stories
-  3. Scoring — compute importance, growth, novelty
-  4. LLM Analysis — analyze top clusters with Gemini/OpenAI
-  5. Weak signals — detect emerging topics
-  6. Podcast — generate daily audio (Edge TTS)
-  7. Notifications — push via FCM
-  8. Optional HF enrichments — NER, classification, keywords, sentiment
+  1. Article Intelligence — LLM structured parsing/classification
+  2. Clustering — group articles by similarity and article signals
+  3. Cluster merging — merge duplicate stories
+  4. Scoring — compute importance, growth, novelty
+  5. LLM Analysis — analyze top clusters with Gemini/OpenAI
+  6. Weak signals — detect emerging topics
+  7. Podcast — generate daily audio (Edge TTS)
+  8. Notifications — push via FCM
+  9. Optional HF enrichments — NER, classification, keywords, sentiment
 """
 
 import logging
@@ -20,6 +21,7 @@ from .ner_extractor import run_ner
 from .classifier import run_classification
 from .keyword_extractor import run_keyword_extraction
 from .sentiment_analyzer import run_sentiment_analysis
+from .article_intelligence import run_article_intelligence
 from .clusterer import run_clustering
 from .cluster_merger import run_cluster_merging
 from .scorer import run_scoring
@@ -58,6 +60,7 @@ def run():
     stats = {
         "articles_fetched": 0,
         "articles_embedded": 0,
+        "articles_enriched": 0,
         "clusters_created": 0,
         "clusters_updated": 0,
         "analyses_generated": 0,
@@ -70,9 +73,14 @@ def run():
                 reset_stats = db.reset_clusters_for_rebuild(cur)
                 log.warning("Cluster rebuild reset: %s", reset_stats)
 
-        # ── Step 1: Clustering ──
+        # ── Step 1: Article Intelligence ──
+        log.info("Step 1: Running article intelligence...")
+        with db.get_cursor() as cur:
+            stats["articles_enriched"] = run_article_intelligence(cur)
+
+        # ── Step 2: Clustering ──
         # Keep the core veille product path before optional HF enrichments.
-        log.info("Step 1: Clustering articles...")
+        log.info("Step 2: Clustering articles...")
         with db.get_cursor() as cur:
             repair_stats = db.repair_cluster_integrity(cur)
             log.info("Cluster integrity before clustering: %s", repair_stats)
@@ -80,43 +88,43 @@ def run():
             stats["clusters_created"] = created
             stats["clusters_updated"] = updated
 
-        # ── Step 2: LLM cluster merging (Pass 2) ──
-        log.info("Step 2: Merging similar clusters (LLM)...")
+        # ── Step 3: LLM cluster merging (Pass 2) ──
+        log.info("Step 3: Merging similar clusters (LLM)...")
         with db.get_cursor() as cur:
             merged = run_cluster_merging(cur)
             repair_stats = db.repair_cluster_integrity(cur)
             log.info("Merged %d cluster groups", merged)
             log.info("Cluster integrity after merging: %s", repair_stats)
 
-        # ── Step 3: Scoring ──
-        log.info("Step 3: Scoring clusters...")
+        # ── Step 4: Scoring ──
+        log.info("Step 4: Scoring clusters...")
         with db.get_cursor() as cur:
             run_scoring(cur)
 
-        # ── Step 4: LLM Analysis ──
-        log.info("Step 4: Running LLM analysis on top clusters...")
+        # ── Step 5: LLM Analysis ──
+        log.info("Step 5: Running LLM analysis on top clusters...")
         with db.get_cursor() as cur:
             analyses = run_llm_analysis(cur, limit=15)
             stats["analyses_generated"] = analyses
 
-        # ── Step 5: Weak signals (rule-based detection) ──
-        log.info("Step 5: Detecting weak signals...")
+        # ── Step 6: Weak signals (rule-based detection) ──
+        log.info("Step 6: Detecting weak signals...")
         with db.get_cursor() as cur:
             signals = detect_weak_signals(cur)
             for signal in signals[:3]:
                 notify_weak_signal(signal["title"], signal["growth_score"])
 
-        # ── Step 6: Grok deep signal analysis (1x/day, premium) ──
-        log.info("Step 6: Running Grok deep signal analysis...")
+        # ── Step 7: Grok deep signal analysis (1x/day, premium) ──
+        log.info("Step 7: Running Grok deep signal analysis...")
         with db.get_cursor() as cur:
             run_weak_signal_analysis(cur)
 
-        # ── Step 7: Podcast ──
-        log.info("Step 7: Generating podcast...")
+        # ── Step 8: Podcast ──
+        log.info("Step 8: Generating podcast...")
         with db.get_cursor() as cur:
             generate_podcast(cur)
 
-        # ── Step 8: Finalize + Notify ──
+        # ── Step 9: Finalize + Notify ──
         with db.get_cursor() as cur:
             db.complete_pipeline_run(cur, run_id, stats)
 
@@ -150,7 +158,7 @@ def run():
                 if articles_sent:
                     run_sentiment_analysis(cur, articles_sent)
 
-        log.info("Step 9: Optional Hugging Face enrichments...")
+        log.info("Step 10: Optional Hugging Face enrichments...")
         run_optional_enrichment("NER", enrich_ner)
         run_optional_enrichment("Classification", enrich_classification)
         run_optional_enrichment("Keyword extraction", enrich_keywords)

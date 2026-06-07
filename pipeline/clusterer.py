@@ -59,6 +59,31 @@ def title_tokens(title: str | None) -> set[str]:
     return tokens
 
 
+def _list_tokens(values) -> set[str]:
+    tokens = set()
+    if not values:
+        return tokens
+    for value in values:
+        if isinstance(value, dict):
+            value = value.get("name")
+        tokens.update(title_tokens(str(value) if value else ""))
+    return tokens
+
+
+def article_signal_tokens(article: dict) -> set[str]:
+    tokens = set()
+    tokens.update(title_tokens(article.get("canonical_title") or article.get("title")))
+    tokens.update(title_tokens(article.get("primary_domain")))
+    tokens.update(title_tokens(article.get("topic")))
+    tokens.update(title_tokens(article.get("event_fingerprint")))
+    tokens.update(title_tokens(article.get("cluster_hint")))
+    tokens.update(_list_tokens(article.get("subtopics")))
+    tokens.update(_list_tokens(article.get("entities")))
+    tokens.update(_list_tokens(article.get("keywords")))
+    tokens.update(_list_tokens(article.get("tags")))
+    return tokens
+
+
 def lexical_anchor_score(article_tokens: set[str], cluster_tokens: set[str]) -> int:
     score = 0
     for token in article_tokens & cluster_tokens:
@@ -66,13 +91,13 @@ def lexical_anchor_score(article_tokens: set[str], cluster_tokens: set[str]) -> 
     return score
 
 
-def passes_lexical_guard(article_title: str | None, cluster_tokens: set[str],
+def passes_lexical_guard(article: dict, cluster_tokens: set[str],
                          similarity: float, founder_similarity: float) -> bool:
     """Avoid merging broad semantic neighbors that do not share title anchors."""
     if similarity >= SAME_EVENT_THRESHOLD or founder_similarity >= SAME_EVENT_THRESHOLD:
         return True
 
-    article_tokens = title_tokens(article_title)
+    article_tokens = article_signal_tokens(article)
     anchor_score = lexical_anchor_score(article_tokens, cluster_tokens)
     if anchor_score >= 2:
         return True
@@ -102,7 +127,13 @@ def run_clustering(cur) -> tuple[int, int]:
         if c["centroid_str"]:
             cluster_data[c["id"]] = {
                 "title": c["title"],
-                "tokens": title_tokens(c["title"]),
+                "tokens": title_tokens(c["title"])
+                | _list_tokens(c.get("primary_domains"))
+                | _list_tokens(c.get("topics"))
+                | _list_tokens(c.get("event_fingerprints"))
+                | _list_tokens(c.get("cluster_hints")),
+                "event_fingerprints": set(c.get("event_fingerprints") or []),
+                "primary_domains": set(c.get("primary_domains") or []),
                 "centroid": parse_embedding(c["centroid_str"]),
                 "founder_embedding": parse_embedding(c.get("founder_embedding_str") or c["centroid_str"]),
                 "article_count": c["article_count"],
@@ -119,6 +150,7 @@ def run_clustering(cur) -> tuple[int, int]:
         emb = parse_embedding(article["embedding_str"])
         best_cluster_id = None
         best_similarity = 0.0
+        best_accept_threshold = SAME_THEME_THRESHOLD
 
         for cid, cdata in cluster_data.items():
             # Skip full clusters
@@ -129,13 +161,30 @@ def run_clustering(cur) -> tuple[int, int]:
             if sim > best_similarity:
                 # Also check similarity with the founding article
                 founder_sim = cosine_similarity(emb, cdata["founder_embedding"])
-                if founder_sim >= SAME_THEME_THRESHOLD and passes_lexical_guard(
-                    article.get("title"), cdata.get("tokens", set()), sim, founder_sim
-                ):
+                article_fingerprint = article.get("event_fingerprint")
+                same_event = bool(
+                    article_fingerprint
+                    and article_fingerprint in cdata.get("event_fingerprints", set())
+                )
+                domain_overlap = bool(
+                    article.get("primary_domain")
+                    and article["primary_domain"] in cdata.get("primary_domains", set())
+                )
+                dynamic_threshold = SAME_THEME_THRESHOLD
+                if same_event:
+                    dynamic_threshold = min(dynamic_threshold, 0.62)
+                elif domain_overlap and article.get("topic"):
+                    dynamic_threshold = min(dynamic_threshold, 0.66)
+
+                guard_ok = same_event or passes_lexical_guard(
+                    article, cdata.get("tokens", set()), sim, founder_sim
+                )
+                if founder_sim >= dynamic_threshold and guard_ok:
                     best_similarity = sim
                     best_cluster_id = cid
+                    best_accept_threshold = dynamic_threshold
 
-        if best_similarity >= SAME_THEME_THRESHOLD and best_cluster_id:
+        if best_similarity >= best_accept_threshold and best_cluster_id:
             role = "primary" if best_similarity >= SAME_EVENT_THRESHOLD else "supporting"
             db.update_article_cluster(cur, article["id"], best_cluster_id)
             db.insert_cluster_article(cur, best_cluster_id, article["id"], float(best_similarity), role)
@@ -143,7 +192,11 @@ def run_clustering(cur) -> tuple[int, int]:
             cdata = cluster_data[best_cluster_id]
             cdata["article_count"] += 1
             cdata["source_names"].add(article["source_name"])
-            cdata["tokens"].update(title_tokens(article.get("title")))
+            cdata["tokens"].update(article_signal_tokens(article))
+            if article.get("event_fingerprint"):
+                cdata["event_fingerprints"].add(article["event_fingerprint"])
+            if article.get("primary_domain"):
+                cdata["primary_domains"].add(article["primary_domain"])
 
             # Update centroid (slow drift — weighted toward founder)
             count = cdata["article_count"]
@@ -166,13 +219,16 @@ def run_clustering(cur) -> tuple[int, int]:
         else:
             # Create new cluster — this article becomes the founder
             new_id = db.gen_id()
-            db.create_cluster(cur, new_id, article["title"][:200], emb)
+            title = article.get("cluster_hint") or article.get("canonical_title") or article["title"]
+            db.create_cluster(cur, new_id, title[:200], emb)
             db.update_article_cluster(cur, article["id"], new_id)
             db.insert_cluster_article(cur, new_id, article["id"], 1.0, "primary")
 
             cluster_data[new_id] = {
-                "title": article["title"][:200],
-                "tokens": title_tokens(article.get("title")),
+                "title": title[:200],
+                "tokens": article_signal_tokens(article),
+                "event_fingerprints": {article["event_fingerprint"]} if article.get("event_fingerprint") else set(),
+                "primary_domains": {article["primary_domain"]} if article.get("primary_domain") else set(),
                 "centroid": emb,
                 "founder_embedding": emb,
                 "article_count": 1,
