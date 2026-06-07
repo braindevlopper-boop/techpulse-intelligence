@@ -42,6 +42,10 @@ def should_recluster_all() -> bool:
     return os.getenv("TECHPULSE_RECLUSTER_ALL", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def should_skip_hf_ml() -> bool:
+    return os.getenv("TECHPULSE_SKIP_HF_ML", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def run_optional_enrichment(step_name: str, fn) -> None:
     try:
         fn()
@@ -158,11 +162,14 @@ def run():
                 if articles_sent:
                     run_sentiment_analysis(cur, articles_sent)
 
-        log.info("Step 10: Optional Hugging Face enrichments...")
-        run_optional_enrichment("NER", enrich_ner)
-        run_optional_enrichment("Classification", enrich_classification)
-        run_optional_enrichment("Keyword extraction", enrich_keywords)
-        run_optional_enrichment("Sentiment", enrich_sentiment)
+        if should_skip_hf_ml():
+            log.info("Step 10: Optional Hugging Face enrichments skipped")
+        else:
+            log.info("Step 10: Optional Hugging Face enrichments...")
+            run_optional_enrichment("NER", enrich_ner)
+            run_optional_enrichment("Classification", enrich_classification)
+            run_optional_enrichment("Keyword extraction", enrich_keywords)
+            run_optional_enrichment("Sentiment", enrich_sentiment)
 
     except Exception as e:
         log.error("Pipeline failed: %s", e, exc_info=True)

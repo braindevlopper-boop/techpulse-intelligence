@@ -23,11 +23,11 @@ on:
       skip_hf_ml:
         description: 'Skip Hugging Face NER/classification/keywords/sentiment steps'
         required: false
-        default: 'false'
+        default: 'true'
         type: choice
         options:
-          - 'false'
           - 'true'
+          - 'false'
       refresh_hf_cache:
         description: 'Download missing Hugging Face models and upload them to R2 cache'
         required: false
@@ -36,6 +36,10 @@ on:
         options:
           - 'false'
           - 'true'
+
+concurrency:
+  group: techpulse-intelligence
+  cancel-in-progress: false
 
 jobs:
   analyze:
