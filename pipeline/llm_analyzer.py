@@ -93,7 +93,24 @@ Produce a JSON response with these fields:
 - "risk_level": "low" | "medium" | "high"
 - "key_takeaways": array of 3 key points (in French)
 - "suggested_keywords": array of 3-5 keywords to track
+- "pedagogical_analysis": a deep educational analysis object in French with:
+  - "executive_explanation": 5-7 sentences that explain the story clearly without jargon
+  - "core_mechanism": the underlying mechanism, cause, constraint, incentive, or technical/market dynamic
+  - "second_order_effects": array of 3-5 non-obvious consequences
+  - "stakeholder_impacts": array of objects with "stakeholder" and "impact"; include companies, developers, investors, regulators, users, suppliers when relevant
+  - "risks": array of 3-5 concrete risks, uncertainties, or failure modes
+  - "opportunities": array of 3-5 concrete opportunities or strategic options
+  - "what_to_watch": array of 4-6 concrete indicators, keywords, events, filings, product launches, pricing changes, or regulatory moves to monitor next
+  - "common_misreadings": array of 2-4 ways readers could misunderstand or over-interpret the story
+  - "bottom_line": one strong paragraph explaining what a serious TechPulse reader should remember
 - "timeline_events": array of key events, each with: "date" (ISO YYYY-MM-DD if known, or null), "title" (short event description in French), "importance" (1-10). Extract 2-5 events from the articles showing how this story evolved.
+
+Quality bar:
+- Do not paraphrase the summary under a different heading.
+- Use concrete facts, names, numbers, constraints, and relationships from the articles.
+- If the source material is thin or uncertain, say exactly what is uncertain.
+- Avoid generic phrases like "this could be important for innovation" unless you explain the causal path.
+- The pedagogical analysis must be useful to a strategic reader who wants to understand the system, not just the headline.
 
 Respond ONLY with valid JSON, no markdown."""
 
@@ -133,7 +150,7 @@ def analyze_with_deepseek(prompt: str, model: str = "deepseek-v4-flash") -> dict
                 "model": model,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.3,
-                "max_tokens": 3500,
+                "max_tokens": 5500,
                 "response_format": {"type": "json_object"},
             },
             timeout=60,
@@ -161,7 +178,7 @@ def analyze_with_gemini(prompt: str) -> dict | None:
                 "contents": [{"parts": [{"text": prompt}]}],
                 "generationConfig": {
                     "temperature": 0.3,
-                    "maxOutputTokens": 3500,
+                    "maxOutputTokens": 5500,
                     "responseMimeType": "application/json",
                 },
             },
@@ -191,7 +208,7 @@ def analyze_with_openai(prompt: str, model: str = "gpt-4o-mini") -> dict | None:
                 "model": model,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.3,
-                "max_tokens": 3500,
+                "max_tokens": 5500,
                 "response_format": {"type": "json_object"},
             },
             timeout=60,
@@ -220,7 +237,7 @@ def analyze_with_grok(prompt: str, model: str = "grok-4.3") -> dict | None:
                 "model": model,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.4,
-                "max_tokens": 3000,
+                "max_tokens": 5500,
             },
             timeout=90,
         )
@@ -240,9 +257,13 @@ def build_cluster_prompt(cluster: dict, articles: list[dict]) -> str:
     articles_text = ""
     for i, a in enumerate(articles[:8], 1):
         desc = a.get("description") or ""
+        full_text = (a.get("full_text") or "").strip()
+        excerpt = full_text[:1200] if full_text else desc[:500]
         pub = a.get("published_at", "")
         date_str = str(pub)[:10] if pub else "unknown"
         articles_text += f"\n{i}. [{a['source_name']}] ({date_str}) {a['title']}\n   {desc[:200]}\n"
+        if excerpt:
+            articles_text += f"   Excerpt: {excerpt}\n"
 
     source_names = sorted(set(a["source_name"] for a in articles if a.get("source_name")))
 
