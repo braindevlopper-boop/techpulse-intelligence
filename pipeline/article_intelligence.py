@@ -262,11 +262,13 @@ def run_article_intelligence(cur, limit: int = ARTICLE_INTELLIGENCE_LIMIT) -> in
 
             db.upsert_article_intelligence(cur, article["id"], provider, model, content)
             _persist_entities_and_keywords(cur, article["id"], content)
+            cur.connection.commit()
             enriched += 1
             log.info("Article intelligence [%s]: %s", provider, content["canonical_title"][:80])
         except Exception as exc:
             log.error("Article intelligence failed for %s: %s", article["id"], exc, exc_info=True)
             db.mark_article_llm_failed(cur, article["id"], str(exc))
+            cur.connection.commit()
 
     log.info("Article intelligence enriched %d/%d articles", enriched, len(articles))
     return enriched
