@@ -25,6 +25,14 @@ on:
         required: false
         default: '120'
         type: string
+      force_llm_analysis:
+        description: 'Regenerate cluster LLM analyses even if they were analyzed recently'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
       skip_hf_ml:
         description: 'Skip Hugging Face NER/classification/keywords/sentiment steps'
         required: false
@@ -107,6 +115,7 @@ jobs:
           TECHPULSE_ALLOW_HF_FAILURE: "true"
           TECHPULSE_SKIP_LEGACY_PODCAST: "true"
           TECHPULSE_ARTICLE_LLM_LIMIT: ${{ github.event.inputs.article_llm_limit || '120' }}
+          TECHPULSE_FORCE_LLM_ANALYSIS: ${{ github.event.inputs.force_llm_analysis || 'false' }}
           TECHPULSE_SAME_THEME_THRESHOLD: ${{ github.event.inputs.same_theme_threshold || '0.68' }}
           TECHPULSE_SAME_EVENT_THRESHOLD: "0.84"
         run: python -m pipeline

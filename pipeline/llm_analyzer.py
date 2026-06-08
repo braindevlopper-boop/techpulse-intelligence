@@ -363,19 +363,21 @@ def run_llm_analysis(cur, limit: int = 15) -> int:
     """
     top_clusters = db.fetch_top_clusters(cur, limit=limit)
     analyzed = 0
+    force = os.environ.get("TECHPULSE_FORCE_LLM_ANALYSIS", "").lower() == "true"
 
     for rank, cluster in enumerate(top_clusters, 1):
         # Skip if already analyzed recently
-        cur.execute(
-            """
-            SELECT id FROM ai_analyses
-            WHERE target_type = 'cluster' AND target_id = %s
-              AND created_at > NOW() - INTERVAL '12 hours'
-            """,
-            (cluster["id"],),
-        )
-        if cur.fetchone():
-            continue
+        if not force:
+            cur.execute(
+                """
+                SELECT id FROM ai_analyses
+                WHERE target_type = 'cluster' AND target_id = %s
+                  AND created_at > NOW() - INTERVAL '12 hours'
+                """,
+                (cluster["id"],),
+            )
+            if cur.fetchone():
+                continue
 
         articles = db.fetch_cluster_articles(cur, cluster["id"])
         if len(articles) < 2:
