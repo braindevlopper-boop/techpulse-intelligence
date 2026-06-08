@@ -21,12 +21,16 @@ Voici {count} clusters d'articles détectés aujourd'hui. Chaque cluster a un ti
 
 {clusters_text}
 
-Ton travail : identifier les clusters qui parlent du MÊME sujet ou de la MÊME histoire et qui devraient être fusionnés.
+Ton travail : identifier les clusters qui parlent du MÊME événement ou de la MÊME histoire précise et qui devraient être fusionnés.
 
 Règles :
-- Ne fusionne que les clusters qui couvrent vraiment le même événement/sujet
-- "Nvidia AI chips" et "Nvidia Computex expansion" = même histoire → fusionner
-- "Nvidia AI chips" et "AMD new GPU" = sujet lié mais différent → NE PAS fusionner
+- Ne fusionne que les doublons ou variantes rédactionnelles du même événement.
+- Si les fingerprints/hints décrivent des événements différents, ne fusionne pas.
+- Ne crée jamais de panier large comme "Global AI governance", "latest developments", "financial news" ou "industry challenges".
+- OpenAI policy, Trump executive order, US House AI bill et EU sovereignty = liés mais différents → NE PAS fusionner.
+- SpaceX IPO price, SpaceX revenue forecast et Google compute deal = liés mais différents → NE PAS fusionner.
+- Summer Game Fest, Xbox Showcase et GTA VI release calendar = liés gaming mais différents → NE PAS fusionner.
+- Deux titres sur les mêmes fuites ISS et le même shelter Dragon = même histoire → fusionner.
 - Un cluster seul qui ne ressemble à aucun autre reste tel quel
 
 Réponds avec un JSON :
@@ -47,7 +51,15 @@ def build_merge_prompt(clusters: list[dict]) -> str:
     """Build the merge prompt with all cluster titles."""
     clusters_text = ""
     for c in clusters:
-        clusters_text += f"- ID: {c['id']} | Articles: {c['article_count']} | \"{c['title']}\"\n"
+        fingerprints = ", ".join(c.get("event_fingerprints") or [])
+        hints = ", ".join(c.get("cluster_hints") or [])
+        topics = ", ".join(c.get("topics") or [])
+        clusters_text += (
+            f"- ID: {c['id']} | Articles: {c['article_count']} | \"{c['title']}\"\n"
+            f"  topics: {topics or 'n/a'}\n"
+            f"  fingerprints: {fingerprints or 'n/a'}\n"
+            f"  hints: {hints or 'n/a'}\n"
+        )
 
     return MERGE_PROMPT.format(
         count=len(clusters),
@@ -140,11 +152,28 @@ def run_cluster_merging(cur) -> int:
     # Only send clusters with 2+ articles to keep prompt short
     cur.execute(
         """
-        SELECT id, title, article_count, source_diversity
-        FROM clusters
-        WHERE status IN ('active', 'growing')
-          AND article_count >= 2
-        ORDER BY article_count DESC
+        SELECT c.id, c.title, c.article_count, c.source_diversity,
+               COALESCE(
+                 ARRAY_AGG(DISTINCT ai.topic) FILTER (WHERE ai.topic IS NOT NULL),
+                 ARRAY[]::text[]
+               ) AS topics,
+               COALESCE(
+                 ARRAY_AGG(DISTINCT ai.event_fingerprint)
+                   FILTER (WHERE ai.event_fingerprint IS NOT NULL),
+                 ARRAY[]::text[]
+               ) AS event_fingerprints,
+               COALESCE(
+                 ARRAY_AGG(DISTINCT ai.cluster_hint)
+                   FILTER (WHERE ai.cluster_hint IS NOT NULL),
+                 ARRAY[]::text[]
+               ) AS cluster_hints
+        FROM clusters c
+        LEFT JOIN cluster_articles ca ON ca.cluster_id = c.id
+        LEFT JOIN article_intelligence ai ON ai.article_id = ca.article_id
+        WHERE c.status IN ('active', 'growing')
+          AND c.article_count >= 2
+        GROUP BY c.id
+        ORDER BY c.article_count DESC
         LIMIT 60
         """,
     )

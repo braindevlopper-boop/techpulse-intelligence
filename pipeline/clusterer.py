@@ -21,6 +21,10 @@ TITLE_STOPWORDS = {
     "under", "was", "what", "when", "where", "will", "with", "your",
     "tech", "technology", "artificial", "intelligence", "models", "model",
     "company", "companies", "market", "markets", "business", "future",
+    "ai", "global", "latest", "news", "developments", "development",
+    "industry", "industries", "financial", "finance", "policy", "policies",
+    "governance", "regulation", "regulatory", "challenge", "challenges",
+    "announcement", "announcements", "update", "updates",
 }
 
 BRAND_TOKENS = {
@@ -87,23 +91,24 @@ def article_signal_tokens(article: dict) -> set[str]:
 def lexical_anchor_score(article_tokens: set[str], cluster_tokens: set[str]) -> int:
     score = 0
     for token in article_tokens & cluster_tokens:
-        score += 1 if token in BRAND_TOKENS else 2
+        score += 2 if token in BRAND_TOKENS else 1
     return score
 
 
 def passes_lexical_guard(article: dict, cluster_tokens: set[str],
                          similarity: float, founder_similarity: float) -> bool:
-    """Avoid merging broad semantic neighbors that do not share title anchors."""
-    if similarity >= SAME_EVENT_THRESHOLD or founder_similarity >= SAME_EVENT_THRESHOLD:
-        return True
-
+    """Avoid merging broad semantic neighbors that do not share strong anchors."""
     article_tokens = article_signal_tokens(article)
     anchor_score = lexical_anchor_score(article_tokens, cluster_tokens)
-    if anchor_score >= 2:
+
+    if anchor_score >= 2 and max(similarity, founder_similarity) >= SAME_EVENT_THRESHOLD:
         return True
 
     has_brand_overlap = bool((article_tokens & cluster_tokens) & BRAND_TOKENS)
-    return has_brand_overlap and max(similarity, founder_similarity) >= 0.74
+    if has_brand_overlap and anchor_score >= 3 and max(similarity, founder_similarity) >= 0.78:
+        return True
+
+    return anchor_score >= 4 and max(similarity, founder_similarity) >= 0.76
 
 
 def run_clustering(cur) -> tuple[int, int]:
@@ -174,7 +179,7 @@ def run_clustering(cur) -> tuple[int, int]:
                 if same_event:
                     dynamic_threshold = min(dynamic_threshold, 0.62)
                 elif domain_overlap and article.get("topic"):
-                    dynamic_threshold = min(dynamic_threshold, 0.66)
+                    dynamic_threshold = max(dynamic_threshold, 0.76)
 
                 guard_ok = same_event or passes_lexical_guard(
                     article, cdata.get("tokens", set()), sim, founder_sim
