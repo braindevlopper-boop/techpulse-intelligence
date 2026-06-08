@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+from datetime import date, datetime
 
 import httpx
 
@@ -35,19 +36,53 @@ def _strip_json_fence(text: str) -> str:
 def _extract_json_candidate(text: str) -> str:
     stripped = _strip_json_fence(text)
     if stripped.startswith("{") or stripped.startswith("["):
-        return stripped
+        balanced = _extract_first_balanced_json(stripped)
+        return balanced or stripped
 
     starts = [pos for pos in (stripped.find("{"), stripped.find("[")) if pos >= 0]
     if not starts:
         return stripped
 
     start = min(starts)
-    open_char = stripped[start]
-    close_char = "}" if open_char == "{" else "]"
-    end = stripped.rfind(close_char)
-    if end <= start:
-        return stripped[start:]
-    return stripped[start:end + 1]
+    balanced = _extract_first_balanced_json(stripped[start:])
+    return balanced or stripped[start:]
+
+
+def _extract_first_balanced_json(text: str) -> str | None:
+    if not text:
+        return None
+
+    opener = text[0]
+    if opener not in "{[":
+        return None
+
+    stack = [opener]
+    in_string = False
+    escaped = False
+    pairs = {"{": "}", "[": "]"}
+
+    for index, char in enumerate(text[1:], 1):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if char in "{[":
+            stack.append(char)
+        elif char in "}]":
+            if not stack or pairs[stack[-1]] != char:
+                return None
+            stack.pop()
+            if not stack:
+                return text[:index + 1]
+
+    return None
 
 
 def _remove_trailing_commas(text: str) -> str:
@@ -71,6 +106,36 @@ def parse_llm_json(text: str, provider: str) -> dict | None:
     preview = candidate[:500].replace("\n", "\\n")
     log.error("%s JSON parse failed. Preview: %s", provider, preview)
     return None
+
+
+def _safe_iso_date(value: object) -> str | None:
+    """Accept only real ISO dates. Ambiguous LLM dates must become NULL."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if not isinstance(value, str):
+        return None
+
+    raw = value.strip()
+    if not raw or raw.lower() in {"null", "none", "unknown", "n/a"}:
+        return None
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
+        return None
+    try:
+        return date.fromisoformat(raw).isoformat()
+    except ValueError:
+        return None
+
+
+def _safe_importance(value: object, default: int = 5) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(1, min(parsed, 10))
 
 
 # ── Prompts ──────────────────────────────────────────────────────────────────
@@ -103,7 +168,7 @@ Produce a JSON response with these fields:
   - "what_to_watch": array of 4-6 concrete indicators, keywords, events, filings, product launches, pricing changes, or regulatory moves to monitor next
   - "common_misreadings": array of 2-4 ways readers could misunderstand or over-interpret the story
   - "bottom_line": one strong paragraph explaining what a serious TechPulse reader should remember
-- "timeline_events": array of key events, each with: "date" (ISO YYYY-MM-DD if known, or null), "title" (short event description in French), "importance" (1-10). Extract 2-5 events from the articles showing how this story evolved.
+- "timeline_events": array of key events, each with: "date" (strict ISO YYYY-MM-DD only when the exact day is known, otherwise null), "title" (short event description in French), "importance" (1-10). Extract 2-5 events from the articles showing how this story evolved.
 
 Quality bar:
 - Do not paraphrase the summary under a different heading.
@@ -111,6 +176,7 @@ Quality bar:
 - If the source material is thin or uncertain, say exactly what is uncertain.
 - Avoid generic phrases like "this could be important for innovation" unless you explain the causal path.
 - The pedagogical analysis must be useful to a strategic reader who wants to understand the system, not just the headline.
+- Never invent partial dates such as "2026-06-??", "2026-06", "June 2026", or "unknown". Use null when the exact date is not available.
 
 Respond ONLY with valid JSON, no markdown."""
 
@@ -339,15 +405,15 @@ def _call_provider(provider: str, prompt: str) -> tuple[dict | None, str, str]:
         if result:
             return result, "deepseek", "deepseek-v4-flash"
 
-    # Ultimate fallback: Gemini
-    result = analyze_with_gemini(prompt)
-    if result:
-        return result, "gemini", "gemini-3.1-flash-lite"
-
-    # Last resort: OpenAI
+    # Preferred fallback: OpenAI tends to preserve structured JSON well.
     result = analyze_with_openai(prompt)
     if result:
         return result, "openai", "gpt-4o-mini"
+
+    # Last resort: Gemini, if configured and authorized.
+    result = analyze_with_gemini(prompt)
+    if result:
+        return result, "gemini", "gemini-3.1-flash-lite"
 
     return None, "", ""
 
@@ -406,18 +472,19 @@ def run_llm_analysis(cur, limit: int = 15) -> int:
                     )
 
             # Insert timeline events from LLM response
+            timeline_count = 0
             for event in result.get("timeline_events", []):
-                if not event.get("title"):
+                if not isinstance(event, dict) or not event.get("title"):
                     continue
                 db.insert_timeline_event(
                     cur,
                     cluster_id=cluster["id"],
                     title=event["title"],
                     description=None,
-                    event_date=event.get("date"),
-                    importance=int(event.get("importance", 5)),
+                    event_date=_safe_iso_date(event.get("date")),
+                    importance=_safe_importance(event.get("importance")),
                 )
-            timeline_count = len(result.get("timeline_events", []))
+                timeline_count += 1
 
             analyzed += 1
             log.info("Analyzed [%s] cluster #%d: %s (%d timeline events)",

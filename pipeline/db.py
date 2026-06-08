@@ -3,7 +3,9 @@
 import os
 import uuid
 import json
+import re
 from contextlib import contextmanager
+from datetime import date, datetime
 
 import psycopg2
 import psycopg2.extras
@@ -29,6 +31,28 @@ def get_cursor():
 
 def gen_id() -> str:
     return uuid.uuid4().hex[:16]
+
+
+def _safe_iso_date(value) -> str | None:
+    """Normalize exact ISO dates and drop ambiguous LLM dates."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if not isinstance(value, str):
+        return None
+
+    raw = value.strip()
+    if not raw or raw.lower() in {"null", "none", "unknown", "n/a"}:
+        return None
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
+        return None
+    try:
+        return date.fromisoformat(raw).isoformat()
+    except ValueError:
+        return None
 
 
 # ── Article queries ──
@@ -698,6 +722,7 @@ def insert_timeline_event(cur, cluster_id: str, title: str,
                           description: str | None, event_date: str | None,
                           importance: int = 0, source_article_id: str | None = None):
     """Insert a timeline event for a cluster. Skip duplicates by title."""
+    safe_event_date = _safe_iso_date(event_date)
     cur.execute(
         """
         INSERT INTO timeline_events (id, cluster_id, title, description,
@@ -706,7 +731,7 @@ def insert_timeline_event(cur, cluster_id: str, title: str,
         ON CONFLICT DO NOTHING
         """,
         (gen_id(), cluster_id, title, description,
-         event_date, importance, source_article_id),
+         safe_event_date, importance, source_article_id),
     )
 
 
