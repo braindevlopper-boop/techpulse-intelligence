@@ -5,11 +5,12 @@ Steps:
   2. Clustering — group articles by similarity and article signals
   3. Cluster merging — merge duplicate stories
   4. Scoring — compute importance, growth, novelty
-  5. LLM Analysis — analyze top clusters with Gemini/OpenAI
-  6. Weak signals — detect emerging topics
-  7. Podcast — generate daily audio (Edge TTS)
-  8. Notifications — push via FCM
-  9. Optional HF enrichments — NER, classification, keywords, sentiment
+  5. Entity relationships — build graph edges from cluster evidence
+  6. LLM Analysis — analyze top clusters with Gemini/OpenAI
+  7. Weak signals — detect emerging topics
+  8. Podcast — generate daily audio (Edge TTS)
+  9. Notifications — push via FCM
+  10. Optional HF enrichments — NER, classification, keywords, sentiment
 """
 
 import logging
@@ -24,6 +25,7 @@ from .sentiment_analyzer import run_sentiment_analysis
 from .article_intelligence import run_article_intelligence
 from .clusterer import run_clustering
 from .cluster_merger import run_cluster_merging
+from .entity_relationships import build_entity_relationships
 from .scorer import run_scoring
 from .llm_analyzer import run_llm_analysis, run_weak_signal_analysis
 from .signal_detector import detect_weak_signals
@@ -109,33 +111,38 @@ def run():
         with db.get_cursor() as cur:
             run_scoring(cur)
 
-        # ── Step 5: LLM Analysis ──
-        log.info("Step 5: Running LLM analysis on top clusters...")
+        # ── Step 5: Entity relationship graph ──
+        log.info("Step 5: Building entity relationship graph...")
+        with db.get_cursor() as cur:
+            build_entity_relationships(cur)
+
+        # ── Step 6: LLM Analysis ──
+        log.info("Step 6: Running LLM analysis on top clusters...")
         with db.get_cursor() as cur:
             analyses = run_llm_analysis(cur, limit=15)
             stats["analyses_generated"] = analyses
 
-        # ── Step 6: Weak signals (rule-based detection) ──
-        log.info("Step 6: Detecting weak signals...")
+        # ── Step 7: Weak signals (rule-based detection) ──
+        log.info("Step 7: Detecting weak signals...")
         with db.get_cursor() as cur:
             signals = detect_weak_signals(cur)
             for signal in signals[:3]:
                 notify_weak_signal(signal["title"], signal["growth_score"])
 
-        # ── Step 7: Grok deep signal analysis (1x/day, premium) ──
-        log.info("Step 7: Running Grok deep signal analysis...")
+        # ── Step 8: Grok deep signal analysis (1x/day, premium) ──
+        log.info("Step 8: Running Grok deep signal analysis...")
         with db.get_cursor() as cur:
             run_weak_signal_analysis(cur)
 
-        # ── Step 8: Podcast ──
+        # ── Step 9: Podcast ──
         if should_skip_legacy_podcast():
-            log.info("Step 8: Legacy intelligence podcast skipped")
+            log.info("Step 9: Legacy intelligence podcast skipped")
         else:
-            log.info("Step 8: Generating podcast...")
+            log.info("Step 9: Generating podcast...")
             with db.get_cursor() as cur:
                 generate_podcast(cur)
 
-        # ── Step 9: Finalize + Notify ──
+        # ── Step 10: Finalize + Notify ──
         with db.get_cursor() as cur:
             db.complete_pipeline_run(cur, run_id, stats)
 
@@ -170,9 +177,9 @@ def run():
                     run_sentiment_analysis(cur, articles_sent)
 
         if should_skip_hf_ml():
-            log.info("Step 10: Optional Hugging Face enrichments skipped")
+            log.info("Step 11: Optional Hugging Face enrichments skipped")
         else:
-            log.info("Step 10: Optional Hugging Face enrichments...")
+            log.info("Step 11: Optional Hugging Face enrichments...")
             run_optional_enrichment("NER", enrich_ner)
             run_optional_enrichment("Classification", enrich_classification)
             run_optional_enrichment("Keyword extraction", enrich_keywords)
