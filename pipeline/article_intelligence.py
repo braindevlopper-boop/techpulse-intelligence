@@ -16,7 +16,7 @@ from .llm_analyzer import analyze_with_deepseek, analyze_with_gemini, analyze_wi
 log = logging.getLogger(__name__)
 
 ARTICLE_INTELLIGENCE_MODEL = os.getenv("TECHPULSE_ARTICLE_LLM_MODEL", "deepseek-v4-flash")
-ARTICLE_INTELLIGENCE_LIMIT = int(os.getenv("TECHPULSE_ARTICLE_LLM_LIMIT", "40"))
+ARTICLE_INTELLIGENCE_LIMIT = int(os.getenv("TECHPULSE_ARTICLE_LLM_LIMIT", "120"))
 
 ARTICLE_INTELLIGENCE_PROMPT = """Tu es l'analyste d'ingestion de TechPulse.
 

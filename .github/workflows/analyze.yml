@@ -101,6 +101,7 @@ jobs:
           TECHPULSE_SKIP_HF_ML: ${{ (github.event.inputs.skip_hf_ml == 'true' || github.event.inputs.recluster_all == 'true') && 'true' || 'false' }}
           TECHPULSE_ALLOW_HF_FAILURE: "true"
           TECHPULSE_SKIP_LEGACY_PODCAST: "true"
+          TECHPULSE_ARTICLE_LLM_LIMIT: "120"
           TECHPULSE_SAME_THEME_THRESHOLD: ${{ github.event.inputs.same_theme_threshold || '0.68' }}
           TECHPULSE_SAME_EVENT_THRESHOLD: "0.84"
         run: python -m pipeline
