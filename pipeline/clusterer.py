@@ -25,6 +25,8 @@ TITLE_STOPWORDS = {
     "industry", "industries", "financial", "finance", "policy", "policies",
     "governance", "regulation", "regulatory", "challenge", "challenges",
     "announcement", "announcements", "update", "updates",
+    "biggest", "calendar", "coverage", "live", "recap", "showcase",
+    "storylines", "trailer", "trailers",
 }
 
 BRAND_TOKENS = {
@@ -57,6 +59,8 @@ def title_tokens(title: str | None) -> set[str]:
     tokens = set()
     for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9.'&-]{1,}", title.lower()):
         clean = token.strip(".'&-").removesuffix("'s")
+        if clean.isdigit() and len(clean) == 4:
+            continue
         if len(clean) < 3 or clean in TITLE_STOPWORDS:
             continue
         tokens.add(clean)
@@ -106,6 +110,9 @@ def passes_lexical_guard(article: dict, cluster_tokens: set[str],
 
     has_brand_overlap = bool((article_tokens & cluster_tokens) & BRAND_TOKENS)
     if has_brand_overlap and anchor_score >= 3 and max(similarity, founder_similarity) >= 0.78:
+        return True
+
+    if anchor_score >= 3 and max(similarity, founder_similarity) >= 0.80:
         return True
 
     return anchor_score >= 4 and max(similarity, founder_similarity) >= 0.76
