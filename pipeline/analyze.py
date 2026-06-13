@@ -24,13 +24,15 @@ from .keyword_extractor import run_keyword_extraction
 from .sentiment_analyzer import run_sentiment_analysis
 from .article_intelligence import run_article_intelligence
 from .clusterer import run_clustering
-from .cluster_merger import run_cluster_merging
+from .cluster_merger import MERGE_PROMPT, run_cluster_merging
 from .entity_relationships import build_entity_relationships
 from .scorer import run_scoring
-from .llm_analyzer import run_llm_analysis, run_weak_signal_analysis
+from .llm_analyzer import CLUSTER_ANALYSIS_PROMPT, WEAK_SIGNAL_PROMPT, run_llm_analysis, run_weak_signal_analysis
 from .signal_detector import detect_weak_signals
 from .podcast_generator import generate_podcast
 from .notifier import notify_pipeline_complete, notify_weak_signal
+from .prompt_lab import propose_and_evaluate_prompt
+from .prompt_registry import seed_default_prompt
 
 logging.basicConfig(
     level=logging.INFO,
@@ -52,6 +54,43 @@ def should_skip_legacy_podcast() -> bool:
     return os.getenv("TECHPULSE_SKIP_LEGACY_PODCAST", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def prompt_lab_task() -> str:
+    return os.getenv("TECHPULSE_PROMPT_LAB_TASK", "").strip()
+
+
+def seed_prompt_registry(cur) -> None:
+    from .article_intelligence import ARTICLE_INTELLIGENCE_MODEL, ARTICLE_INTELLIGENCE_PROMPT
+
+    seed_default_prompt(
+        cur,
+        task="article_intelligence",
+        template=ARTICLE_INTELLIGENCE_PROMPT,
+        model_provider="deepseek",
+        model_name=ARTICLE_INTELLIGENCE_MODEL,
+    )
+    seed_default_prompt(
+        cur,
+        task="cluster_analysis",
+        template=CLUSTER_ANALYSIS_PROMPT,
+        model_provider="deepseek",
+        model_name="deepseek-v4-flash",
+    )
+    seed_default_prompt(
+        cur,
+        task="weak_signal_analysis",
+        template=WEAK_SIGNAL_PROMPT,
+        model_provider="grok",
+        model_name="grok-4.3",
+    )
+    seed_default_prompt(
+        cur,
+        task="cluster_merge",
+        template=MERGE_PROMPT,
+        model_provider="deepseek",
+        model_name="deepseek-v4-flash",
+    )
+
+
 def run_optional_enrichment(step_name: str, fn) -> None:
     try:
         fn()
@@ -64,8 +103,28 @@ def run():
     log.info("TechPulse Intelligence Pipeline — Starting")
     log.info("=" * 60)
 
+    prompt_task = prompt_lab_task()
+    if prompt_task:
+        prompt_theme = os.getenv("TECHPULSE_PROMPT_LAB_THEME", "general").strip() or "general"
+        prompt_goal = os.getenv(
+            "TECHPULSE_PROMPT_LAB_GOAL",
+            "Améliorer la profondeur, la fiabilité et la différenciation UX sans augmenter fortement le coût.",
+        ).strip()
+        log.info("Prompt Lab requested for %s/%s", prompt_task, prompt_theme)
+        with db.get_cursor() as cur:
+            seed_prompt_registry(cur)
+            candidate_id = propose_and_evaluate_prompt(
+                cur,
+                task=prompt_task,
+                theme=prompt_theme,
+                improvement_goal=prompt_goal,
+            )
+            log.info("Prompt Lab candidate: %s", candidate_id)
+        return
+
     with db.get_cursor() as cur:
         run_id = db.insert_pipeline_run(cur, "intelligence")
+        seed_prompt_registry(cur)
 
     stats = {
         "articles_fetched": 0,

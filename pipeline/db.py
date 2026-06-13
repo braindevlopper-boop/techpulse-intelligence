@@ -33,6 +33,201 @@ def gen_id() -> str:
     return uuid.uuid4().hex[:16]
 
 
+# ── Prompt registry ──
+
+def ensure_prompt_registry(cur):
+    """Create prompt registry tables used to version and evaluate prompts."""
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS prompt_templates (
+          id               TEXT PRIMARY KEY,
+          task             TEXT NOT NULL,
+          theme            TEXT NOT NULL DEFAULT 'general',
+          version          INTEGER NOT NULL DEFAULT 1,
+          status           TEXT NOT NULL DEFAULT 'draft',
+          template         TEXT NOT NULL,
+          variables        JSONB NOT NULL DEFAULT '[]'::jsonb,
+          model_provider   TEXT,
+          model_name       TEXT,
+          parent_id        TEXT,
+          quality_score    INTEGER,
+          evaluator_score  INTEGER,
+          evaluator_notes  JSONB NOT NULL DEFAULT '{}'::jsonb,
+          created_by       TEXT NOT NULL DEFAULT 'system',
+          created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          UNIQUE(task, theme, version)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_prompt_templates_active_unique
+        ON prompt_templates(task, theme)
+        WHERE status = 'active'
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_prompt_templates_task_theme_status
+        ON prompt_templates(task, theme, status)
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS prompt_evaluations (
+          id                  TEXT PRIMARY KEY,
+          prompt_template_id  TEXT NOT NULL REFERENCES prompt_templates(id) ON DELETE CASCADE,
+          evaluator_provider  TEXT NOT NULL,
+          evaluator_model     TEXT NOT NULL,
+          score               INTEGER NOT NULL,
+          recommendation      TEXT NOT NULL,
+          notes               JSONB NOT NULL DEFAULT '{}'::jsonb,
+          sample_count        INTEGER NOT NULL DEFAULT 0,
+          created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_prompt_evaluations_prompt_created
+        ON prompt_evaluations(prompt_template_id, created_at DESC)
+        """
+    )
+
+
+def seed_prompt_template(
+    cur,
+    *,
+    task: str,
+    theme: str,
+    template: str,
+    variables: list[str],
+    model_provider: str | None = None,
+    model_name: str | None = None,
+):
+    """Insert the code fallback as version 1 if no DB prompt exists yet."""
+    ensure_prompt_registry(cur)
+    cur.execute(
+        """
+        INSERT INTO prompt_templates (
+          id, task, theme, version, status, template, variables,
+          model_provider, model_name, created_by
+        )
+        VALUES (%s, %s, %s, 1, 'active', %s, %s::jsonb, %s, %s, 'code_seed')
+        ON CONFLICT (task, theme, version) DO NOTHING
+        """,
+        (
+            gen_id(),
+            task,
+            theme,
+            template,
+            json.dumps(variables),
+            model_provider,
+            model_name,
+        ),
+    )
+
+
+def fetch_active_prompt_template(cur, task: str, theme: str = "general") -> dict | None:
+    ensure_prompt_registry(cur)
+    cur.execute(
+        """
+        SELECT id, task, theme, version, template, variables,
+               model_provider, model_name, quality_score, evaluator_score,
+               evaluator_notes, created_by, updated_at
+        FROM prompt_templates
+        WHERE task = %s
+          AND status = 'active'
+          AND theme IN (%s, 'general')
+        ORDER BY CASE WHEN theme = %s THEN 0 ELSE 1 END, version DESC
+        LIMIT 1
+        """,
+        (task, theme, theme),
+    )
+    return cur.fetchone()
+
+
+def insert_prompt_candidate(
+    cur,
+    *,
+    task: str,
+    theme: str,
+    template: str,
+    variables: list[str],
+    parent_id: str | None,
+    model_provider: str,
+    model_name: str,
+    evaluator_notes: dict | None = None,
+) -> str:
+    ensure_prompt_registry(cur)
+    cur.execute(
+        """
+        SELECT COALESCE(MAX(version), 0) + 1 AS next_version
+        FROM prompt_templates
+        WHERE task = %s AND theme = %s
+        """,
+        (task, theme),
+    )
+    version = cur.fetchone()["next_version"]
+    prompt_id = gen_id()
+    cur.execute(
+        """
+        INSERT INTO prompt_templates (
+          id, task, theme, version, status, template, variables,
+          model_provider, model_name, parent_id, evaluator_notes, created_by
+        )
+        VALUES (%s, %s, %s, %s, 'candidate', %s, %s::jsonb, %s, %s, %s, %s::jsonb, 'llm')
+        """,
+        (
+            prompt_id,
+            task,
+            theme,
+            version,
+            template,
+            json.dumps(variables),
+            model_provider,
+            model_name,
+            parent_id,
+            json.dumps(evaluator_notes or {}),
+        ),
+    )
+    return prompt_id
+
+
+def insert_prompt_evaluation(
+    cur,
+    *,
+    prompt_template_id: str,
+    evaluator_provider: str,
+    evaluator_model: str,
+    score: int,
+    recommendation: str,
+    notes: dict,
+    sample_count: int = 0,
+):
+    ensure_prompt_registry(cur)
+    cur.execute(
+        """
+        INSERT INTO prompt_evaluations (
+          id, prompt_template_id, evaluator_provider, evaluator_model,
+          score, recommendation, notes, sample_count
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s)
+        """,
+        (
+            gen_id(),
+            prompt_template_id,
+            evaluator_provider,
+            evaluator_model,
+            max(0, min(100, int(score))),
+            recommendation,
+            json.dumps(notes or {}),
+            sample_count,
+        ),
+    )
+
+
 def _safe_iso_date(value) -> str | None:
     """Normalize exact ISO dates and drop ambiguous LLM dates."""
     if value is None:

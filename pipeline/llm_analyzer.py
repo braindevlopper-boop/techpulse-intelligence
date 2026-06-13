@@ -16,6 +16,7 @@ from datetime import date, datetime
 import httpx
 
 from . import db
+from .prompt_registry import render_prompt
 
 log = logging.getLogger(__name__)
 
@@ -318,7 +319,7 @@ def analyze_with_grok(prompt: str, model: str = "grok-4.3") -> dict | None:
 
 # ── Prompt builders ──────────────────────────────────────────────────────────
 
-def build_cluster_prompt(cluster: dict, articles: list[dict]) -> str:
+def build_cluster_prompt(cur, cluster: dict, articles: list[dict]) -> str:
     """Build the analysis prompt for a cluster."""
     articles_text = ""
     for i, a in enumerate(articles[:8], 1):
@@ -333,15 +334,26 @@ def build_cluster_prompt(cluster: dict, articles: list[dict]) -> str:
 
     source_names = sorted(set(a["source_name"] for a in articles if a.get("source_name")))
 
-    return CLUSTER_ANALYSIS_PROMPT.format(
-        title=cluster["title"],
-        source_count=len(articles),
-        source_names=", ".join(source_names),
-        articles_text=articles_text,
+    rendered = render_prompt(
+        cur,
+        task="cluster_analysis",
+        theme="general",
+        fallback_template=CLUSTER_ANALYSIS_PROMPT,
+        values={
+            "title": cluster["title"],
+            "source_count": len(articles),
+            "source_names": ", ".join(source_names),
+            "articles_text": articles_text,
+        },
+        model_provider="deepseek",
+        model_name="deepseek-v4-flash",
     )
+    if rendered.source == "db":
+        log.info("Prompt cluster_analysis: %s v%s", rendered.theme, rendered.version)
+    return rendered.text
 
 
-def build_weak_signal_prompt(clusters: list[dict]) -> str:
+def build_weak_signal_prompt(cur, clusters: list[dict]) -> str:
     """Build prompt for Grok weak signal detection."""
     clusters_text = ""
     for i, c in enumerate(clusters, 1):
@@ -350,7 +362,18 @@ def build_weak_signal_prompt(clusters: list[dict]) -> str:
             f"\n   Articles: {c['article_count']} | Sources: {c['source_diversity']}"
             f"\n   Growth: {c['growth_score']} | Novelty: {c['novelty_score']}\n"
         )
-    return WEAK_SIGNAL_PROMPT.format(clusters_text=clusters_text)
+    rendered = render_prompt(
+        cur,
+        task="weak_signal_analysis",
+        theme="general",
+        fallback_template=WEAK_SIGNAL_PROMPT,
+        values={"clusters_text": clusters_text},
+        model_provider="grok",
+        model_name="grok-4.3",
+    )
+    if rendered.source == "db":
+        log.info("Prompt weak_signal_analysis: %s v%s", rendered.theme, rendered.version)
+    return rendered.text
 
 
 # ── Orchestration ────────────────────────────────────────────────────────────
@@ -449,7 +472,7 @@ def run_llm_analysis(cur, limit: int = 15) -> int:
         if len(articles) < 2:
             continue
 
-        prompt = build_cluster_prompt(cluster, articles)
+        prompt = build_cluster_prompt(cur, cluster, articles)
         provider = _pick_provider(cluster, rank)
         result, used_provider, used_model = _call_provider(provider, prompt)
 
@@ -504,7 +527,7 @@ def run_weak_signal_analysis(cur) -> dict | None:
         log.info("Not enough clusters for weak signal analysis")
         return None
 
-    prompt = build_weak_signal_prompt(clusters)
+    prompt = build_weak_signal_prompt(cur, clusters)
     log.info("Running Grok 4.3 weak signal analysis on %d clusters...", len(clusters))
 
     result = analyze_with_grok(prompt)

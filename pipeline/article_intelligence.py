@@ -12,6 +12,7 @@ from datetime import date
 
 from . import db
 from .llm_analyzer import analyze_with_deepseek, analyze_with_gemini, analyze_with_openai
+from .prompt_registry import render_prompt
 
 log = logging.getLogger(__name__)
 
@@ -85,19 +86,39 @@ def _clean_text(value: str | None, limit: int) -> str:
     return text[:limit]
 
 
-def _build_prompt(article: dict) -> str:
+def _build_prompt(article: dict, cur=None) -> str:
     published = article.get("published_at")
     published_at = str(published)[:10] if published else "unknown"
     text = _clean_text(article.get("full_text") or article.get("description"), 3500)
-    return ARTICLE_INTELLIGENCE_PROMPT.format(
-        source_name=article.get("source_name") or "unknown",
-        source_type=article.get("source_type") or "unknown",
-        published_at=published_at,
-        url=article.get("url") or "",
-        title=_clean_text(article.get("title"), 300),
-        description=_clean_text(article.get("description"), 800),
-        text=text,
+    values = {
+        "source_name": article.get("source_name") or "unknown",
+        "source_type": article.get("source_type") or "unknown",
+        "published_at": published_at,
+        "url": article.get("url") or "",
+        "title": _clean_text(article.get("title"), 300),
+        "description": _clean_text(article.get("description"), 800),
+        "text": text,
+    }
+    if cur is None:
+        return ARTICLE_INTELLIGENCE_PROMPT.format(**values)
+
+    rendered = render_prompt(
+        cur,
+        task="article_intelligence",
+        theme=article.get("source_type") or "general",
+        fallback_template=ARTICLE_INTELLIGENCE_PROMPT,
+        values=values,
+        model_provider="deepseek",
+        model_name=ARTICLE_INTELLIGENCE_MODEL,
     )
+    if rendered.source == "db":
+        log.info(
+            "Prompt article_intelligence: %s/%s v%s",
+            rendered.theme,
+            rendered.task,
+            rendered.version,
+        )
+    return rendered.text
 
 
 def _as_list(value) -> list:
@@ -176,8 +197,8 @@ def normalize_result(result: dict, article: dict) -> dict:
     return normalized
 
 
-def analyze_article(article: dict) -> tuple[dict | None, str, str]:
-    prompt = _build_prompt(article)
+def analyze_article(article: dict, cur=None) -> tuple[dict | None, str, str]:
+    prompt = _build_prompt(article, cur=cur)
     result = analyze_with_deepseek(prompt, model=ARTICLE_INTELLIGENCE_MODEL)
     if result:
         return normalize_result(result, article), "deepseek", ARTICLE_INTELLIGENCE_MODEL
@@ -255,7 +276,7 @@ def run_article_intelligence(cur, limit: int = ARTICLE_INTELLIGENCE_LIMIT) -> in
     enriched = 0
     for article in articles:
         try:
-            content, provider, model = analyze_article(article)
+            content, provider, model = analyze_article(article, cur=cur)
             if not content:
                 db.mark_article_llm_failed(cur, article["id"], "article intelligence returned no JSON")
                 continue

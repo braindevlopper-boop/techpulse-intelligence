@@ -12,6 +12,7 @@ import logging
 
 from . import db
 from .llm_analyzer import analyze_with_deepseek, analyze_with_gemini
+from .prompt_registry import render_prompt
 
 log = logging.getLogger(__name__)
 
@@ -47,7 +48,7 @@ Réponds avec un JSON :
 Ne retourne QUE les groupes à fusionner. Les clusters isolés ne doivent pas apparaître."""
 
 
-def build_merge_prompt(clusters: list[dict]) -> str:
+def build_merge_prompt(cur, clusters: list[dict]) -> str:
     """Build the merge prompt with all cluster titles."""
     clusters_text = ""
     for c in clusters:
@@ -61,10 +62,21 @@ def build_merge_prompt(clusters: list[dict]) -> str:
             f"  hints: {hints or 'n/a'}\n"
         )
 
-    return MERGE_PROMPT.format(
-        count=len(clusters),
-        clusters_text=clusters_text,
+    rendered = render_prompt(
+        cur,
+        task="cluster_merge",
+        theme="general",
+        fallback_template=MERGE_PROMPT,
+        values={
+            "count": len(clusters),
+            "clusters_text": clusters_text,
+        },
+        model_provider="deepseek",
+        model_name="deepseek-v4-flash",
     )
+    if rendered.source == "db":
+        log.info("Prompt cluster_merge: %s v%s", rendered.theme, rendered.version)
+    return rendered.text
 
 
 def execute_merges(cur, merge_groups: list[dict]) -> int:
@@ -184,7 +196,7 @@ def run_cluster_merging(cur) -> int:
         return 0
 
     log.info("Running LLM cluster merge on %d clusters (2+ articles)...", len(clusters))
-    prompt = build_merge_prompt(clusters)
+    prompt = build_merge_prompt(cur, clusters)
 
     result = analyze_with_deepseek(prompt, model="deepseek-v4-flash")
     if not result:
