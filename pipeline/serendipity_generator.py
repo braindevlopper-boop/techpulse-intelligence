@@ -20,7 +20,7 @@ import xml.etree.ElementTree as ET
 import httpx
 
 from . import db
-from .llm_analyzer import analyze_with_gemini
+from .llm_analyzer import analyze_with_deepseek, analyze_with_gemini
 
 log = logging.getLogger(__name__)
 
@@ -117,7 +117,13 @@ Réponds uniquement par ce JSON :
 
 
 def _vulgarize(paper: dict, domain: str, category: str) -> dict | None:
-    result = analyze_with_gemini(_build_prompt(paper, domain))
+    prompt = _build_prompt(paper, domain)
+    # Gemini en priorité, DeepSeek en repli (toujours configuré comme analyseur principal).
+    result = analyze_with_gemini(prompt)
+    provider, model = "gemini", "gemini-3.1-flash-lite"
+    if not result or not result.get("title_choc"):
+        result = analyze_with_deepseek(prompt)
+        provider, model = "deepseek", "deepseek-v4-flash"
     if not result or not result.get("title_choc"):
         return None
     return {
@@ -133,8 +139,8 @@ def _vulgarize(paper: dict, domain: str, category: str) -> dict | None:
         "paper_title": paper["title"][:500],
         "authors": paper["authors"],
         "published_at": paper["published_at"],
-        "model_provider": "gemini",
-        "model_name": "gemini-3.1-flash-lite",
+        "model_provider": provider,
+        "model_name": model,
     }
 
 
