@@ -5,6 +5,7 @@ on:
     types: [ingest_complete]
   schedule:
     - cron: '0 7,13,19 * * *'    # Fallback: 1h after ingest
+    - cron: '43 16 * * *'        # Temporary test: 18:43 CEST / 16:43 UTC
   workflow_dispatch:
     inputs:
       recluster_all:
