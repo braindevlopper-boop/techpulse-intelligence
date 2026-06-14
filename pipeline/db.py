@@ -1129,3 +1129,41 @@ def complete_pipeline_run(cur, run_id: str, stats: dict):
         """,
         {**stats, "run_id": run_id},
     )
+
+
+# ── Sérendipité scientifique ──
+
+def fetch_recent_serendipity_arxiv_ids(cur, limit: int = 500) -> set[str]:
+    """Identifiants arXiv déjà transformés en cartes (pour éviter les doublons)."""
+    cur.execute(
+        "SELECT arxiv_id FROM serendipity_cards "
+        "WHERE arxiv_id IS NOT NULL ORDER BY created_at DESC LIMIT %s",
+        (limit,),
+    )
+    return {row["arxiv_id"] for row in cur.fetchall()}
+
+
+def insert_serendipity_card(cur, card: dict) -> str | None:
+    """Insère une carte. ON CONFLICT(arxiv_id) → ignore les doublons."""
+    sid = gen_id()
+    cur.execute(
+        """
+        INSERT INTO serendipity_cards (
+          id, arxiv_id, source_url, domain, arxiv_category,
+          title_choc, enigme, personnage, concept, so_what,
+          paper_title, authors, published_at, model_provider, model_name
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s)
+        ON CONFLICT (arxiv_id) DO NOTHING
+        RETURNING id
+        """,
+        (
+            sid, card.get("arxiv_id"), card.get("source_url"), card.get("domain"),
+            card.get("arxiv_category"), card["title_choc"], card.get("enigme"),
+            card.get("personnage"), card.get("concept"), card.get("so_what"),
+            card.get("paper_title"), json.dumps(card.get("authors", [])),
+            card.get("published_at"), card.get("model_provider"), card.get("model_name"),
+        ),
+    )
+    row = cur.fetchone()
+    return row["id"] if row else None

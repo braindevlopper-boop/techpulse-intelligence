@@ -30,6 +30,7 @@ from .scorer import run_scoring
 from .llm_analyzer import CLUSTER_ANALYSIS_PROMPT, WEAK_SIGNAL_PROMPT, run_llm_analysis, run_weak_signal_analysis
 from .signal_detector import detect_weak_signals
 from .podcast_generator import generate_podcast
+from .serendipity_generator import run_serendipity
 from .notifier import notify_pipeline_complete, notify_weak_signal
 from .prompt_lab import propose_and_evaluate_prompt
 from .prompt_registry import seed_default_prompt
@@ -200,6 +201,13 @@ def run():
             log.info("Step 9: Generating podcast...")
             with db.get_cursor() as cur:
                 generate_podcast(cur)
+
+        # ── Step 9b: Sérendipité scientifique (pépites arXiv vulgarisées) ──
+        if os.getenv("SERENDIPITY_ENABLED", "1") not in ("0", "false", "False"):
+            def serendipity_step():
+                with db.get_cursor() as cur:
+                    run_serendipity(cur)
+            run_optional_enrichment("Step 9b: Serendipity", serendipity_step)
 
         # ── Step 10: Finalize + Notify ──
         with db.get_cursor() as cur:
