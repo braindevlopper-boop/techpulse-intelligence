@@ -1,9 +1,6 @@
 name: TechPulse Intelligence
 
 on:
-  push:
-    branches:
-      - main
   repository_dispatch:
     types: [ingest_complete]
   schedule:
