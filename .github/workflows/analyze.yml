@@ -84,11 +84,11 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Preload Hugging Face models
-        if: ${{ github.event.inputs.recluster_all != 'true' && github.event.inputs.skip_hf_ml != 'true' }}
+        if: ${{ (github.event.inputs.recluster_all || 'false') != 'true' && (github.event.inputs.skip_hf_ml || 'true') != 'true' }}
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          HF_HUB_OFFLINE: ${{ github.event.inputs.refresh_hf_cache == 'true' && '0' || '1' }}
-          TECHPULSE_HF_DOWNLOAD_MISSING: ${{ github.event.inputs.refresh_hf_cache == 'true' && 'true' || 'false' }}
+          HF_HUB_OFFLINE: ${{ (github.event.inputs.refresh_hf_cache || 'false') == 'true' && '0' || '1' }}
+          TECHPULSE_HF_DOWNLOAD_MISSING: ${{ (github.event.inputs.refresh_hf_cache || 'false') == 'true' && 'true' || 'false' }}
           R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -110,9 +110,9 @@ jobs:
           R2_PUBLIC_URL: ${{ secrets.R2_PUBLIC_URL }}
           FIREBASE_SERVER_KEY: ${{ secrets.FIREBASE_SERVER_KEY }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          HF_HUB_OFFLINE: ${{ github.event.inputs.skip_hf_ml != 'true' && '1' || '0' }}
+          HF_HUB_OFFLINE: "1"
           TECHPULSE_RECLUSTER_ALL: ${{ github.event.inputs.recluster_all || 'false' }}
-          TECHPULSE_SKIP_HF_ML: ${{ (github.event.inputs.skip_hf_ml == 'true' || github.event.inputs.recluster_all == 'true') && 'true' || 'false' }}
+          TECHPULSE_SKIP_HF_ML: ${{ ((github.event.inputs.skip_hf_ml || 'true') == 'true' || (github.event.inputs.recluster_all || 'false') == 'true') && 'true' || 'false' }}
           TECHPULSE_ALLOW_HF_FAILURE: "true"
           TECHPULSE_SKIP_LEGACY_PODCAST: "true"
           TECHPULSE_ARTICLE_LLM_LIMIT: ${{ github.event.inputs.article_llm_limit || '120' }}
