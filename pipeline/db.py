@@ -1143,8 +1143,75 @@ def fetch_recent_serendipity_arxiv_ids(cur, limit: int = 500) -> set[str]:
     return {row["arxiv_id"] for row in cur.fetchall()}
 
 
+def fetch_recent_serendipity_source_urls(cur, limit: int = 500) -> set[str]:
+    """Sources déjà transformées en cartes, quelle que soit leur origine."""
+    cur.execute(
+        "SELECT source_url FROM serendipity_cards "
+        "WHERE source_url IS NOT NULL ORDER BY created_at DESC LIMIT %s",
+        (limit,),
+    )
+    return {row["source_url"] for row in cur.fetchall()}
+
+
+def fetch_serendipity_candidates(cur, limit: int = 80) -> list[dict]:
+    """Recent TechPulse intelligence items suitable for inspiration cards."""
+    cur.execute(
+        """
+        SELECT
+          a.id AS article_id,
+          a.url AS source_url,
+          a.title,
+          a.description,
+          a.source_name,
+          a.source_type,
+          a.category,
+          a.published_at,
+          a.fetched_at,
+          ai.primary_domain,
+          ai.topic,
+          ai.subtopics,
+          ai.entities,
+          ai.keywords,
+          ai.tags,
+          ai.quality_score,
+          ai.relevance_score,
+          ai.cluster_hint,
+          c.id AS cluster_id,
+          c.title AS cluster_title,
+          c.importance_score,
+          c.novelty_score,
+          c.growth_score,
+          ca.role AS cluster_role
+        FROM articles a
+        LEFT JOIN article_intelligence ai ON ai.article_id = a.id
+        LEFT JOIN cluster_articles ca ON ca.article_id = a.id
+        LEFT JOIN clusters c ON c.id = ca.cluster_id
+        WHERE a.url IS NOT NULL
+          AND a.title IS NOT NULL
+          AND COALESCE(a.published_at, a.fetched_at) >= NOW() - INTERVAL '21 days'
+          AND a.status IN ('processed', 'clustered', 'analyzed')
+          AND (
+            ai.article_id IS NOT NULL
+            OR c.id IS NOT NULL
+            OR LOWER(COALESCE(a.source_type, '')) = 'arxiv'
+          )
+          AND CONCAT_WS(' ', a.title, a.description, ai.topic, ai.primary_domain, c.title) !~*
+              '(grand theft auto|final fantasy|video games?|summer game fest|multiplayer sequel|remake trilogy|entertainment/games)'
+          AND CONCAT_WS(' ', a.title, a.description, ai.topic, ai.primary_domain, ai.keywords::text, ai.tags::text, c.title) ~*
+              '(science|research|paper|arxiv|nature|physics|quantum|astro|space|cosmo|neuro|brain|bio|biotech|medicine|medical|genom|crispr|protein|drug|materials?|battery|energy|fusion|nuclear|robot|semiconductor|chip|climate|mathematics|algorithm|ai model|artificial intelligence|nasa|mit)'
+        ORDER BY
+          COALESCE(ai.relevance_score, 0) DESC,
+          COALESCE(c.novelty_score, 0) DESC,
+          COALESCE(a.published_at, a.fetched_at) DESC
+        LIMIT %s
+        """,
+        (limit,),
+    )
+    return cur.fetchall()
+
+
 def insert_serendipity_card(cur, card: dict) -> str | None:
-    """Insère une carte. ON CONFLICT(arxiv_id) → ignore les doublons."""
+    """Insère une carte. Les doublons arXiv sont ignorés par contrainte DB."""
     sid = gen_id()
     cur.execute(
         """
