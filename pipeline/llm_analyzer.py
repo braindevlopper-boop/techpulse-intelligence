@@ -141,7 +141,7 @@ def _safe_importance(value: object, default: int = 5) -> int:
 
 # ── Prompts ──────────────────────────────────────────────────────────────────
 
-CLUSTER_ANALYSIS_PROMPT = """You are a tech and finance analyst. Analyze this cluster of related articles.
+CLUSTER_ANALYSIS_PROMPT = """You are a strategic intelligence editor. Analyze this cluster of related articles.
 
 Cluster title: {title}
 Number of sources: {source_count}
@@ -152,10 +152,10 @@ Articles:
 
 Produce a JSON response with these fields:
 - "summary": 2-3 sentence summary in French
-- "why_it_matters": why this matters for a developer/investor (in French)
-- "tech_impact": technical consequences (in French)
-- "business_impact": business consequences (in French)
-- "finance_impact": market/financial consequences (in French)
+- "why_it_matters": why this matters for the relevant audience in this story (in French)
+- "tech_impact": technical/product/developer consequences in French, or null when the story is not technical
+- "business_impact": company/industry/operator consequences in French, or null when not relevant
+- "finance_impact": market/financial/investor consequences in French, or null when not relevant
 - "risk_level": "low" | "medium" | "high"
 - "key_takeaways": array of 3 key points (in French)
 - "suggested_keywords": array of 3-5 keywords to track
@@ -163,7 +163,7 @@ Produce a JSON response with these fields:
   - "executive_explanation": 5-7 sentences that explain the story clearly without jargon
   - "core_mechanism": the underlying mechanism, cause, constraint, incentive, or technical/market dynamic
   - "second_order_effects": array of 3-5 non-obvious consequences
-  - "stakeholder_impacts": array of objects with "stakeholder" and "impact"; include companies, developers, investors, regulators, users, suppliers when relevant
+  - "stakeholder_impacts": array of objects with "stakeholder" and "impact"; choose only stakeholders that truly appear in or are directly affected by the story. Examples: states, regulators, consumers, patients, researchers, companies, developers, investors, suppliers, workers, military actors. Do not include developers or investors by default.
   - "risks": array of 3-5 concrete risks, uncertainties, or failure modes
   - "opportunities": array of 3-5 concrete opportunities or strategic options
   - "what_to_watch": array of 4-6 concrete indicators, keywords, events, filings, product launches, pricing changes, or regulatory moves to monitor next
@@ -173,6 +173,8 @@ Produce a JSON response with these fields:
 
 Quality bar:
 - Do not paraphrase the summary under a different heading.
+- Do not force a tech/developer/investor framing. For geopolitics, energy, science, regulation, health, or society stories, use the actual affected actors and set irrelevant impact fields to null.
+- Each impact field must add a distinct causal angle. If two fields would say the same thing, keep the most relevant field and set the other to null.
 - Use concrete facts, names, numbers, constraints, and relationships from the articles.
 - If the source material is thin or uncertain, say exactly what is uncertain.
 - Avoid generic phrases like "this could be important for innovation" unless you explain the causal path.

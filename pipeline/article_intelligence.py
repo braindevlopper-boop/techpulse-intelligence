@@ -76,6 +76,9 @@ Règles:
 - should_cluster=false seulement pour contenu hors sujet, trop vide, doublon technique évident ou page non informative.
 - event_fingerprint doit regrouper seulement le même événement, pas un thème large.
 - Si une information est absente, mets null ou [].
+- Ne force pas un angle développeur, investisseur ou marché si l'article ne s'y prête pas.
+- Pour géopolitique, énergie, diplomatie, santé, science ou société, mets null dans les champs d'impact non pertinents.
+- tech_impact, business_impact et finance_impact doivent chacun apporter un angle causal distinct. Si deux champs répètent la même idée, garde seulement le plus pertinent et mets l'autre à null.
 """
 
 
