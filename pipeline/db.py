@@ -288,7 +288,13 @@ def fetch_articles_for_llm_intelligence(cur, limit: int = 40) -> list[dict]:
           AND a.status IN ('processed', 'clustered', 'analyzed')
           AND ai.article_id IS NULL
           AND COALESCE(a.llm_enrichment_status, 'pending') <> 'failed'
-        ORDER BY a.fetched_at DESC
+        ORDER BY
+          CASE
+            WHEN a.source_name ~* '(bioRxiv|medRxiv|ChemRxiv|EarthArXiv|OSF|PLOS|Cell|Lancet|Cochrane|Nature|Science|NASA|Quanta|MIT Tech Review|Ars Technica Science|Science News|Conversation|Cosmos|Discover|HAL|Springer|ScienceDirect|Wiley|Grok Frontier|Grok Bio|Grok Physics)'
+              THEN 0
+            ELSE 1
+          END,
+          a.fetched_at DESC
         LIMIT %s
         """,
         (limit,),
@@ -1194,11 +1200,12 @@ def fetch_serendipity_candidates(cur, limit: int = 80) -> list[dict]:
             ai.article_id IS NOT NULL
             OR c.id IS NOT NULL
             OR LOWER(COALESCE(a.source_type, '')) = 'arxiv'
+            OR a.source_name ~* '(bioRxiv|medRxiv|ChemRxiv|EarthArXiv|OSF|PLOS|Cell|Lancet|Cochrane|Nature|Science|NASA|Quanta|MIT Tech Review|Ars Technica Science|Science News|Conversation|Cosmos|Discover|HAL|Springer|ScienceDirect|Wiley|Grok Frontier|Grok Bio|Grok Physics)'
           )
           AND CONCAT_WS(' ', a.title, a.description, ai.topic, ai.primary_domain, c.title) !~*
               '(grand theft auto|final fantasy|video games?|summer game fest|multiplayer sequel|remake trilogy|entertainment/games)'
           AND CONCAT_WS(' ', a.title, a.description, ai.topic, ai.primary_domain, ai.keywords::text, ai.tags::text, c.title) ~*
-              '(science|research|paper|arxiv|nature|physics|quantum|astro|space|cosmo|neuro|brain|bio|biotech|medicine|medical|genom|crispr|protein|drug|materials?|battery|energy|fusion|nuclear|robot|semiconductor|chip|climate|mathematics|algorithm|ai model|artificial intelligence|nasa|mit)'
+              '(science|research|paper|preprint|clinical trial|dataset|journal|arxiv|biorxiv|medrxiv|chemrxiv|eartharxiv|osf|plos|cell|lancet|cochrane|nature|physics|quantum|astro|space|cosmo|neuro|brain|bio|biotech|medicine|medical|genom|crispr|protein|drug|chemistry|catalysis|materials?|battery|energy|fusion|nuclear|robot|semiconductor|chip|climate|earth science|mathematics|algorithm|ai model|artificial intelligence|nasa|mit)'
         ORDER BY
           COALESCE(ai.relevance_score, 0) DESC,
           COALESCE(c.novelty_score, 0) DESC,

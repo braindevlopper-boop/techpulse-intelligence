@@ -123,8 +123,13 @@ recherche appliquée, médecine, espace, énergie, semi-conducteurs, IA ou robot
 
 Règles :
 - Utilise uniquement les faits présents dans les candidats.
-- Choisis des sujets multidisciplinaires et surprenants, pas seulement arXiv.
+- Choisis des sujets multidisciplinaires et surprenants.
+- Ne sélectionne pas plus d'une carte issue d'arXiv si d'autres sources sont disponibles.
+- Favorise la diversité des sources : preprints bio/médecine/chimie, revues scientifiques,
+  institutions de recherche, analyses science crédibles, Grok science, et clusters TechPulse.
 - Évite les doublons et les sujets purement business/produit.
+- Évite les actualités trop légères : il faut une idée, une méthode, un résultat ou une
+  implication scientifique concrète.
 - Garde un ton captivant, clair, sans jargon gratuit.
 - Chaque carte doit référencer un "source_id" fourni.
 
