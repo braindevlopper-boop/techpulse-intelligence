@@ -6,6 +6,7 @@ on:
   schedule:
     - cron: '0 7,13,19 * * *'    # Fallback: 1h after ingest
     - cron: '43 16 * * *'        # Temporary test: 18:43 CEST / 16:43 UTC
+    - cron: '30 7 * * *'         # 09:30 Paris (CEST) — run de test
   workflow_dispatch:
     inputs:
       recluster_all:

@@ -262,7 +262,7 @@ def run():
                     for row in rows:
                         content = row["content"] if isinstance(row["content"], dict) else json.loads(row["content"] or "{}")
                         pred_count += extract_predictions_from_cluster_analysis(
-                            cur, row["targetId"], row["title"], content
+                            cur, row["target_id"], row["title"], content
                         )
                     stats["predictions_extracted"] = pred_count
                     if pred_count:
