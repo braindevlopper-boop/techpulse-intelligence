@@ -13,11 +13,18 @@ from datetime import date
 from . import db
 from .llm_analyzer import analyze_with_deepseek, analyze_with_gemini, analyze_with_openai
 from .prompt_registry import render_prompt
+from .prompt_profiles import (
+    detect_domain,
+    build_impact_fields_section,
+    build_stakeholders_hint,
+    build_quality_hint,
+    get_profile,
+)
 
 log = logging.getLogger(__name__)
 
 ARTICLE_INTELLIGENCE_MODEL = os.getenv("TECHPULSE_ARTICLE_LLM_MODEL", "deepseek-v4-flash")
-ARTICLE_INTELLIGENCE_LIMIT = int(os.getenv("TECHPULSE_ARTICLE_LLM_LIMIT", "120"))
+ARTICLE_INTELLIGENCE_LIMIT = int(os.getenv("TECHPULSE_ARTICLE_LLM_LIMIT", "60"))
 
 ARTICLE_INTELLIGENCE_PROMPT = """Tu es l'analyste d'ingestion de TechPulse.
 
@@ -32,6 +39,8 @@ Article:
 - Texte:
 {text}
 
+Domaine détecté: {domain_label}
+
 Réponds uniquement avec un JSON valide, sans markdown.
 
 Schéma attendu:
@@ -40,7 +49,7 @@ Schéma attendu:
   "canonical_title": "titre nettoyé et factuel, sans HTML, clickbait ni source",
   "summary": "résumé en français en 1-2 phrases",
   "article_type": "news" | "analysis" | "opinion" | "research" | "press_release" | "market_note" | "tutorial" | "social_discussion" | "other",
-  "primary_domain": "ai" | "software" | "semiconductors" | "cloud" | "cybersecurity" | "fintech" | "crypto" | "markets" | "macroeconomics" | "energy" | "space" | "defense" | "regulation" | "startups" | "consumer_tech" | "gaming" | "other",
+  "primary_domain": "ai" | "software" | "semiconductors" | "cloud" | "cybersecurity" | "fintech" | "crypto" | "markets" | "macroeconomics" | "energy" | "space" | "defense" | "regulation" | "startups" | "consumer_tech" | "gaming" | "science" | "other",
   "topic": "thème court et normalisé, ex: spacex ipo, openai aws, ai capex, nvidia chips",
   "subtopics": ["0 à 5 sous-thèmes"],
   "event_fingerprint": "clé stable en anglais, lowercase, 3-8 mots, pour regrouper le même événement exact",
@@ -57,9 +66,7 @@ Schéma attendu:
   "tags": ["3 à 8 tags courts"],
   "sentiment": "positive" | "negative" | "neutral" | "mixed",
   "sentiment_score": -1.0,
-  "tech_impact": "impact technique en français, ou null",
-  "business_impact": "impact business en français, ou null",
-  "finance_impact": "impact marché/finance en français, ou null",
+{impact_fields}
   "market_impact": "low" | "medium" | "high" | "unknown",
   "quality_score": 0,
   "relevance_score": 0,
@@ -67,7 +74,8 @@ Schéma attendu:
   "time_sensitivity": "low" | "medium" | "high",
   "should_cluster": true,
   "cluster_hint": "titre court du cluster idéal",
-  "confidence": 0.0
+  "confidence": 0.0,
+  "epistemic": "peer-reviewed" | "preprint" | "communique" | "analyse" | "presse" | "rumeur"
 }}
 
 Règles:
@@ -76,9 +84,16 @@ Règles:
 - should_cluster=false seulement pour contenu hors sujet, trop vide, doublon technique évident ou page non informative.
 - event_fingerprint doit regrouper seulement le même événement, pas un thème large.
 - Si une information est absente, mets null ou [].
-- Ne force pas un angle développeur, investisseur ou marché si l'article ne s'y prête pas.
-- Pour géopolitique, énergie, diplomatie, santé, science ou société, mets null dans les champs d'impact non pertinents.
-- tech_impact, business_impact et finance_impact doivent chacun apporter un angle causal distinct. Si deux champs répètent la même idée, garde seulement le plus pertinent et mets l'autre à null.
+- Chaque champ d'impact doit apporter un angle causal distinct. Si deux champs répètent la même idée, garde le plus pertinent et mets l'autre à null.
+- {quality_hint}
+- {stakeholders_hint}
+- epistemic reflète la nature de la source et des affirmations :
+  • peer-reviewed : papier publié dans une revue à comité de lecture
+  • preprint : arXiv, bioRxiv, working paper non encore publié
+  • communique : communiqué officiel d'entreprise, institution, gouvernement
+  • analyse : analyse, opinion argumentée, éditorial, podcast expert
+  • presse : article de presse classique, news recap
+  • rumeur : fuite non confirmée, rumeur, spéculation
 """
 
 
@@ -93,14 +108,31 @@ def _build_prompt(article: dict, cur=None) -> str:
     published = article.get("published_at")
     published_at = str(published)[:10] if published else "unknown"
     text = _clean_text(article.get("full_text") or article.get("description"), 3500)
+    title = _clean_text(article.get("title"), 300)
+    description = _clean_text(article.get("description"), 800)
+    source_type = article.get("source_type") or "unknown"
+
+    # Détecter le domaine pour adapter le prompt
+    domain = detect_domain(
+        title=title,
+        description=description,
+        theme=source_type,
+        primary_domain=article.get("primary_domain", ""),
+    )
+    profile = get_profile(domain)
+
     values = {
         "source_name": article.get("source_name") or "unknown",
-        "source_type": article.get("source_type") or "unknown",
+        "source_type": source_type,
         "published_at": published_at,
         "url": article.get("url") or "",
-        "title": _clean_text(article.get("title"), 300),
-        "description": _clean_text(article.get("description"), 800),
+        "title": title,
+        "description": description,
         "text": text,
+        "domain_label": profile["label"],
+        "impact_fields": build_impact_fields_section(domain),
+        "stakeholders_hint": build_stakeholders_hint(domain),
+        "quality_hint": build_quality_hint(domain),
     }
     if cur is None:
         return ARTICLE_INTELLIGENCE_PROMPT.format(**values)
@@ -108,7 +140,7 @@ def _build_prompt(article: dict, cur=None) -> str:
     rendered = render_prompt(
         cur,
         task="article_intelligence",
-        theme=article.get("source_type") or "general",
+        theme=domain,
         fallback_template=ARTICLE_INTELLIGENCE_PROMPT,
         values=values,
         model_provider="deepseek",
@@ -116,10 +148,11 @@ def _build_prompt(article: dict, cur=None) -> str:
     )
     if rendered.source == "db":
         log.info(
-            "Prompt article_intelligence: %s/%s v%s",
+            "Prompt article_intelligence: %s/%s v%s (domain=%s)",
             rendered.theme,
             rendered.task,
             rendered.version,
+            domain,
         )
     return rendered.text
 

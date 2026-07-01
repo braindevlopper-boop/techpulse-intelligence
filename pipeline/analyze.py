@@ -10,9 +10,12 @@ Steps:
   7. Weak signals — detect emerging topics
   8. Podcast — generate daily audio (Edge TTS)
   9. Notifications — push via FCM
+  9b. Serendipity — arXiv science nuggets
+  9c. Podcast moments — extract quotes, predictions, concepts from transcripts
   10. Optional HF enrichments — NER, classification, keywords, sentiment
 """
 
+import json
 import logging
 import os
 import sys
@@ -31,6 +34,8 @@ from .llm_analyzer import CLUSTER_ANALYSIS_PROMPT, WEAK_SIGNAL_PROMPT, run_llm_a
 from .signal_detector import detect_weak_signals
 from .podcast_generator import generate_podcast
 from .serendipity_generator import run_serendipity
+from .podcast_moments_extractor import run_podcast_moments_extraction
+from .prediction_tracker import extract_predictions_from_cluster_analysis, extract_predictions_from_podcast_moments
 from .notifier import notify_pipeline_complete, notify_weak_signal
 from .prompt_lab import propose_and_evaluate_prompt
 from .prompt_registry import seed_default_prompt
@@ -61,7 +66,9 @@ def prompt_lab_task() -> str:
 
 def seed_prompt_registry(cur) -> None:
     from .article_intelligence import ARTICLE_INTELLIGENCE_MODEL, ARTICLE_INTELLIGENCE_PROMPT
+    from .prompt_profiles import DOMAIN_PROFILES, build_impact_fields_section, build_stakeholders_hint, build_quality_hint, get_profile
 
+    # Seed le prompt "general" (fallback)
     seed_default_prompt(
         cur,
         task="article_intelligence",
@@ -76,6 +83,61 @@ def seed_prompt_registry(cur) -> None:
         model_provider="deepseek",
         model_name="deepseek-v4-flash",
     )
+
+    # Seed un prompt par domaine (ai, macroeconomics, space, energy...)
+    # Chaque domaine a ses propres champs d'impact, stakeholders et quality hints
+    for domain_key, profile in DOMAIN_PROFILES.items():
+        if domain_key == "general":
+            continue  # déjà seedé ci-dessus
+
+        domain_label = profile["label"]
+        impact_fields = build_impact_fields_section(domain_key)
+        stakeholders_hint = build_stakeholders_hint(domain_key)
+        quality_hint = build_quality_hint(domain_key)
+
+        # Article intelligence — variante par domaine
+        domain_article_prompt = ARTICLE_INTELLIGENCE_PROMPT.replace(
+            "{domain_label}", domain_label
+        ).replace(
+            "{impact_fields}", impact_fields
+        ).replace(
+            "{stakeholders_hint}", stakeholders_hint
+        ).replace(
+            "{quality_hint}", quality_hint
+        )
+        seed_default_prompt(
+            cur,
+            task="article_intelligence",
+            theme=domain_key,
+            template=domain_article_prompt,
+            model_provider="deepseek",
+            model_name=ARTICLE_INTELLIGENCE_MODEL,
+        )
+
+        # Cluster analysis — variante par domaine
+        impact_lines = []
+        for field_name, field_desc in profile["impact_fields"]:
+            impact_lines.append(f'- "{field_name}": {field_desc}, or null when not relevant')
+        impact_fields_str = "\n".join(impact_lines)
+
+        domain_cluster_prompt = CLUSTER_ANALYSIS_PROMPT.replace(
+            "{domain_label}", domain_label
+        ).replace(
+            "{impact_fields}", impact_fields_str
+        ).replace(
+            "{stakeholders_hint}", stakeholders_hint
+        ).replace(
+            "{quality_hint}", quality_hint
+        )
+        seed_default_prompt(
+            cur,
+            task="cluster_analysis",
+            theme=domain_key,
+            template=domain_cluster_prompt,
+            model_provider="deepseek",
+            model_name="deepseek-v4-flash",
+        )
+
     seed_default_prompt(
         cur,
         task="weak_signal_analysis",
@@ -179,8 +241,33 @@ def run():
         # ── Step 6: LLM Analysis ──
         log.info("Step 6: Running LLM analysis on top clusters...")
         with db.get_cursor() as cur:
-            analyses = run_llm_analysis(cur, limit=15)
+            analyses = run_llm_analysis(cur, limit=10)
             stats["analyses_generated"] = analyses
+
+        # ── Step 6b: Extract predictions from cluster analyses ──
+        if os.getenv("TECHPULSE_PREDICTIONS_ENABLED", "1") not in ("0", "false", "False"):
+            def predictions_step():
+                with db.get_cursor() as cur:
+                    cur.execute(
+                        """SELECT aa.target_id, aa.content, c.title
+                           FROM ai_analyses aa
+                           JOIN clusters c ON c.id = aa.target_id
+                           WHERE aa.target_type = 'cluster'
+                             AND aa.analysis_type = 'full'
+                             AND aa.created_at > NOW() - INTERVAL '1 hour'
+                        """
+                    )
+                    rows = cur.fetchall()
+                    pred_count = 0
+                    for row in rows:
+                        content = row["content"] if isinstance(row["content"], dict) else json.loads(row["content"] or "{}")
+                        pred_count += extract_predictions_from_cluster_analysis(
+                            cur, row["targetId"], row["title"], content
+                        )
+                    stats["predictions_extracted"] = pred_count
+                    if pred_count:
+                        log.info("[Predictions] Extracted %d predictions from cluster analyses", pred_count)
+            run_optional_enrichment("Step 6b: Predictions extraction", predictions_step)
 
         # ── Step 7: Weak signals (rule-based detection) ──
         log.info("Step 7: Detecting weak signals...")
@@ -208,6 +295,35 @@ def run():
                 with db.get_cursor() as cur:
                     run_serendipity(cur)
             run_optional_enrichment("Step 9b: Serendipity", serendipity_step)
+
+        # ── Step 9c: Podcast moments extraction (citations, prédictions, concepts) ──
+        if os.getenv("TECHPULSE_PODCAST_MOMENTS_ENABLED", "1") not in ("0", "false", "False"):
+            def podcast_moments_step():
+                with db.get_cursor() as cur:
+                    moments_count = run_podcast_moments_extraction(cur)
+                    stats["podcast_moments_extracted"] = moments_count
+
+                    # Extract predictions from podcast moments
+                    cur.execute(
+                        """SELECT aa.target_id, aa.content, a.title, a.source_name
+                           FROM ai_analyses aa
+                           JOIN articles a ON a.id = aa.target_id
+                           WHERE aa.target_type = 'article'
+                             AND aa.analysis_type = 'podcast_moments'
+                             AND aa.created_at > NOW() - INTERVAL '1 hour'
+                        """
+                    )
+                    rows = cur.fetchall()
+                    pred_count = 0
+                    for row in rows:
+                        content = row["content"] if isinstance(row["content"], dict) else json.loads(row["content"] or "{}")
+                        pred_count += extract_predictions_from_podcast_moments(
+                            cur, row["targetId"], row["title"], row["sourceName"] or "", content
+                        )
+                    if pred_count:
+                        stats["predictions_from_podcasts"] = pred_count
+                        log.info("[Predictions] Extracted %d predictions from podcast moments", pred_count)
+            run_optional_enrichment("Step 9c: Podcast moments", podcast_moments_step)
 
         # ── Step 10: Finalize + Notify ──
         with db.get_cursor() as cur:

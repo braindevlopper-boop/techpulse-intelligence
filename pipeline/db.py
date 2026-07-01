@@ -12,7 +12,10 @@ import psycopg2.extras
 
 
 def get_connection():
-    return psycopg2.connect(os.environ["NEON_DATABASE_URL"], sslmode="require")
+    db_url = os.environ.get("DATABASE_URL") or os.environ.get("NEON_DATABASE_URL")
+    if not db_url:
+        raise RuntimeError("DATABASE_URL (or NEON_DATABASE_URL) is required")
+    return psycopg2.connect(db_url, sslmode="require")
 
 
 @contextmanager
@@ -256,7 +259,10 @@ def fetch_processed_articles(cur, limit: int = 500) -> list[dict]:
     """Articles with embeddings but not yet clustered."""
     cur.execute(
         """
-        SELECT a.id, a.title, a.description, a.full_text, a.source_type, a.source_name,
+        -- Egress: do NOT select full_text/description here. Clustering only
+        -- needs the embedding + title/metadata signals; full_text alone was
+        -- up to ~15 KB/article pulled out of Neon on every run, 3x/day.
+        SELECT a.id, a.title, a.source_type, a.source_name,
                a.published_at, a.external_score, a.embedding::text as embedding_str,
                a.category, a.sentiment,
                ai.canonical_title, ai.primary_domain, ai.topic, ai.subtopics,

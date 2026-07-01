@@ -24,7 +24,7 @@ on:
       article_llm_limit:
         description: 'Max articles to enrich with Article Intelligence in this run'
         required: false
-        default: '120'
+        default: '60'
         type: string
       force_llm_analysis:
         description: 'Regenerate cluster LLM analyses even if they were analyzed recently'
@@ -98,11 +98,16 @@ jobs:
 
       - name: Run intelligence pipeline
         env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
           NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           XAI_API_KEY: ${{ secrets.XAI_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_MODEL_PREMIUM: ${{ vars.OPENROUTER_MODEL_PREMIUM }}
+          OPENROUTER_MODEL_TAIL: ${{ vars.OPENROUTER_MODEL_TAIL }}
+          OPENROUTER_PREMIUM_TOP_N: ${{ vars.OPENROUTER_PREMIUM_TOP_N }}
           R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -115,8 +120,33 @@ jobs:
           TECHPULSE_SKIP_HF_ML: ${{ ((github.event.inputs.skip_hf_ml || 'true') == 'true' || (github.event.inputs.recluster_all || 'false') == 'true') && 'true' || 'false' }}
           TECHPULSE_ALLOW_HF_FAILURE: "true"
           TECHPULSE_SKIP_LEGACY_PODCAST: "true"
-          TECHPULSE_ARTICLE_LLM_LIMIT: ${{ github.event.inputs.article_llm_limit || '120' }}
+          TECHPULSE_ARTICLE_LLM_LIMIT: ${{ github.event.inputs.article_llm_limit || '60' }}
           TECHPULSE_FORCE_LLM_ANALYSIS: ${{ github.event.inputs.force_llm_analysis || 'false' }}
           TECHPULSE_SAME_THEME_THRESHOLD: ${{ github.event.inputs.same_theme_threshold || '0.68' }}
           TECHPULSE_SAME_EVENT_THRESHOLD: "0.84"
         run: python -m pipeline
+
+      - name: Dispatch signal push notifications
+        if: ${{ success() }}
+        continue-on-error: true
+        env:
+          WORKER_URL: ${{ secrets.TECHPULSE_WORKER_URL }}
+          WORKER_API_SECRET: ${{ secrets.TECHPULSE_WORKER_SECRET }}
+        run: |
+          if [ -z "$WORKER_URL" ] || [ -z "$WORKER_API_SECRET" ]; then
+            echo "WORKER_URL or WORKER_API_SECRET not set — skipping signal push dispatch"
+            exit 0
+          fi
+          echo "Dispatching signal push alerts to Worker..."
+          response=$(curl -s -w "\n%{http_code}" -X POST \
+            "${WORKER_URL}/push/signals/dispatch" \
+            -H "Authorization: Bearer ${WORKER_API_SECRET}" \
+            -H "Content-Type: application/json" \
+            --max-time 30)
+          http_code=$(echo "$response" | tail -1)
+          body=$(echo "$response" | head -n -1)
+          echo "HTTP $http_code"
+          echo "Response: $body"
+          if [ "$http_code" != "200" ]; then
+            echo "Warning: signal dispatch returned non-200, but continuing (continue-on-error)"
+          fi

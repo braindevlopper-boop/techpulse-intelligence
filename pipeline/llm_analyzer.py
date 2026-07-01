@@ -1,10 +1,13 @@
-"""LLM analysis on top clusters — DeepSeek V4, Gemini 3.1, OpenAI, Grok 4.3.
+"""LLM analysis on top clusters.
 
-Strategy (optimized for cost, June 2026):
-  - DeepSeek V4 Flash  → default for all cluster analyses ($0.14/M input)
-  - Gemini 3.1 Flash-Lite → podcast scripts, summaries ($0.25/M input)
-  - GPT-4o-mini         → final UX syntheses, quiz ($0.15/M input)
-  - Grok 4.3            → 1-2 deep signal analyses/day only ($1.25/M input)
+Cluster analysis is routed through OpenRouter (one key, many models) with a
+per-tier model so the important clusters get a premium model and the long tail
+runs cheap/free. If OPENROUTER_API_KEY is unset or a call fails, we fall back to
+the legacy direct providers below, so nothing breaks during the migration.
+
+Tier models are configured via env (see OPENROUTER_MODEL_* below). The other
+pipeline modules (podcast, article_intelligence, cluster_merger, …) still use the
+direct provider functions for now and will be migrated to OpenRouter next.
 """
 
 import json
@@ -17,6 +20,13 @@ import httpx
 
 from . import db
 from .prompt_registry import render_prompt
+from .prompt_profiles import (
+    detect_domain,
+    build_impact_fields_section,
+    build_stakeholders_hint,
+    build_quality_hint,
+    get_profile,
+)
 
 log = logging.getLogger(__name__)
 
@@ -24,6 +34,25 @@ DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent"
 OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 GROK_URL = "https://api.x.ai/v1/chat/completions"
+
+# ── OpenRouter (unified LLM gateway) ──────────────────────────────────────────
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+# Cluster-analysis model tiers (OpenRouter slugs, verified June 2026). Override
+# via env. A wrong/unavailable slug degrades gracefully: the OpenRouter call
+# fails and we fall back to the legacy direct providers.
+#   premium: deepseek/deepseek-v4-pro     ($0.435/$0.87)  — near-frontier quality, ~€1/mo @ top 5/day
+#   tail:    deepseek/deepseek-v4-flash   ($0.098/$0.196) — reliable JSON, near-free
+# Alts for premium (higher French/prose finesse, higher cost): z-ai/glm-5.2 (~€3.4/mo),
+# google/gemini-3.5-flash (~€6/mo), anthropic/claude-sonnet-4.6 (~€10/mo).
+# `or` (not getenv default) so an empty env value from an unset GitHub repo
+# variable still falls back to the default instead of becoming "".
+OPENROUTER_MODEL_PREMIUM = os.getenv("OPENROUTER_MODEL_PREMIUM") or "deepseek/deepseek-v4-pro"
+OPENROUTER_MODEL_TAIL = os.getenv("OPENROUTER_MODEL_TAIL") or "deepseek/deepseek-v4-flash"
+# Auto-premium on top clusters is OFF by default (0): the feed cluster analyses
+# run on the cheap tail model, and premium is reserved for the on-demand
+# per-article deep-dive. Set >0 to re-enable auto-premium on the top N clusters.
+OPENROUTER_PREMIUM_TOP_N = int(os.getenv("OPENROUTER_PREMIUM_TOP_N") or "0")
 
 
 def _strip_json_fence(text: str) -> str:
@@ -146,6 +175,7 @@ CLUSTER_ANALYSIS_PROMPT = """You are a strategic intelligence editor. Analyze th
 Cluster title: {title}
 Number of sources: {source_count}
 Sources: {source_names}
+Domaine détecté: {domain_label}
 
 Articles:
 {articles_text}
@@ -153,9 +183,7 @@ Articles:
 Produce a JSON response with these fields:
 - "summary": 2-3 sentence summary in French
 - "why_it_matters": why this matters for the relevant audience in this story (in French)
-- "tech_impact": technical/product/developer consequences in French, or null when the story is not technical
-- "business_impact": company/industry/operator consequences in French, or null when not relevant
-- "finance_impact": market/financial/investor consequences in French, or null when not relevant
+{impact_fields}
 - "risk_level": "low" | "medium" | "high"
 - "key_takeaways": array of 3 key points (in French)
 - "suggested_keywords": array of 3-5 keywords to track
@@ -163,17 +191,34 @@ Produce a JSON response with these fields:
   - "executive_explanation": 5-7 sentences that explain the story clearly without jargon
   - "core_mechanism": the underlying mechanism, cause, constraint, incentive, or technical/market dynamic
   - "second_order_effects": array of 3-5 non-obvious consequences
-  - "stakeholder_impacts": array of objects with "stakeholder" and "impact"; choose only stakeholders that truly appear in or are directly affected by the story. Examples: states, regulators, consumers, patients, researchers, companies, developers, investors, suppliers, workers, military actors. Do not include developers or investors by default.
+  - "stakeholder_impacts": array of objects with "stakeholder" and "impact"; {stakeholders_hint}. Do not include developers or investors by default.
   - "risks": array of 3-5 concrete risks, uncertainties, or failure modes
   - "opportunities": array of 3-5 concrete opportunities or strategic options
   - "what_to_watch": array of 4-6 concrete indicators, keywords, events, filings, product launches, pricing changes, or regulatory moves to monitor next
   - "common_misreadings": array of 2-4 ways readers could misunderstand or over-interpret the story
   - "bottom_line": one strong paragraph explaining what a serious TechPulse reader should remember
 - "timeline_events": array of key events, each with: "date" (strict ISO YYYY-MM-DD only when the exact day is known, otherwise null), "title" (short event description in French), "importance" (1-10). Extract 2-5 events from the articles showing how this story evolved.
+- "epistemic": the overall epistemic status of this cluster, choose one:
+  • "peer-reviewed": published research with peer review
+  • "preprint": arXiv/bioRxiv working paper, not yet published
+  • "communique": official statement from a company, institution, or government
+  • "analyse": analysis, argued opinion, editorial, expert podcast
+  • "presse": standard press article, news recap
+  • "rumeur": unconfirmed leak, rumor, speculation
+- "predictions": array of 0-3 predictions made in or implied by the articles, each with:
+  - "prediction": what is predicted to happen (in French)
+  - "horizon": "short-term" | "medium-term" | "long-term" | "unknown"
+  - "confidence": "stated" | "implied" | "speculative"
+  Only include real predictions about the future, not general observations. If no predictions, return empty array.
+- "counter_analysis": a deliberate contradictory reading to fight hype, in French, with:
+  - "counter_thesis": one-sentence opposing thesis
+  - "arguments_against": array of 2-4 arguments that contradict or seriously temper the main thesis
+  - "what_would_change_the_view": array of 2-3 concrete signals that would flip the analysis
+  If the story is trivial or purely factual with no debatable thesis, return null.
 
 Quality bar:
 - Do not paraphrase the summary under a different heading.
-- Do not force a tech/developer/investor framing. For geopolitics, energy, science, regulation, health, or society stories, use the actual affected actors and set irrelevant impact fields to null.
+- {quality_hint}
 - Each impact field must add a distinct causal angle. If two fields would say the same thing, keep the most relevant field and set the other to null.
 - Use concrete facts, names, numbers, constraints, and relationships from the articles.
 - If the source material is thin or uncertain, say exactly what is uncertain.
@@ -322,7 +367,7 @@ def analyze_with_grok(prompt: str, model: str = "grok-4.3") -> dict | None:
 # ── Prompt builders ──────────────────────────────────────────────────────────
 
 def build_cluster_prompt(cur, cluster: dict, articles: list[dict]) -> str:
-    """Build the analysis prompt for a cluster."""
+    """Build the analysis prompt for a cluster, adapted to the cluster's domain."""
     articles_text = ""
     for i, a in enumerate(articles[:8], 1):
         desc = a.get("description") or ""
@@ -336,22 +381,43 @@ def build_cluster_prompt(cur, cluster: dict, articles: list[dict]) -> str:
 
     source_names = sorted(set(a["source_name"] for a in articles if a.get("source_name")))
 
+    # Détecter le domaine du cluster
+    cluster_title = cluster.get("title") or ""
+    cluster_summary = cluster.get("summary") or ""
+    cluster_theme = cluster.get("main_theme") or ""
+    domain = detect_domain(
+        title=cluster_title,
+        description=cluster_summary,
+        theme=cluster_theme,
+    )
+    profile = get_profile(domain)
+
+    # Construire les champs d'impact adaptatifs au format JSON
+    impact_lines = []
+    for field_name, field_desc in profile["impact_fields"]:
+        impact_lines.append(f'- "{field_name}": {field_desc}, or null when not relevant')
+    impact_fields_str = "\n".join(impact_lines)
+
     rendered = render_prompt(
         cur,
         task="cluster_analysis",
-        theme="general",
+        theme=domain,
         fallback_template=CLUSTER_ANALYSIS_PROMPT,
         values={
             "title": cluster["title"],
             "source_count": len(articles),
             "source_names": ", ".join(source_names),
             "articles_text": articles_text,
+            "domain_label": profile["label"],
+            "impact_fields": impact_fields_str,
+            "stakeholders_hint": build_stakeholders_hint(domain),
+            "quality_hint": build_quality_hint(domain),
         },
         model_provider="deepseek",
         model_name="deepseek-v4-flash",
     )
     if rendered.source == "db":
-        log.info("Prompt cluster_analysis: %s v%s", rendered.theme, rendered.version)
+        log.info("Prompt cluster_analysis: %s v%s (domain=%s)", rendered.theme, rendered.version, domain)
     return rendered.text
 
 
@@ -443,6 +509,71 @@ def _call_provider(provider: str, prompt: str) -> tuple[dict | None, str, str]:
     return None, "", ""
 
 
+def analyze_with_openrouter(prompt: str, model: str) -> dict | None:
+    """Call any model through OpenRouter (OpenAI-compatible gateway)."""
+    api_key = os.environ.get("OPENROUTER_API_KEY")
+    if not api_key:
+        return None
+
+    try:
+        resp = httpx.post(
+            OPENROUTER_URL,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "HTTP-Referer": "https://techpulse.app",
+                "X-Title": "TechPulse",
+            },
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.3,
+                "max_tokens": 5500,
+                "response_format": {"type": "json_object"},
+            },
+            timeout=90,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        text = data["choices"][0]["message"]["content"]
+        return parse_llm_json(text, f"OpenRouter:{model}")
+    except Exception as e:
+        log.error("OpenRouter error (%s): %s", model, e)
+        return None
+
+
+def _pick_cluster_model(cluster: dict, rank: int) -> str:
+    """Cheap tail model for feed cluster analyses by default. Premium is reserved
+    for the on-demand per-article deep-dive; set OPENROUTER_PREMIUM_TOP_N>0 to
+    re-enable auto-premium on the top / high-signal clusters."""
+    if OPENROUTER_PREMIUM_TOP_N <= 0:
+        return OPENROUTER_MODEL_TAIL
+    growth = cluster.get("growth_score") or 0
+    importance = cluster.get("importance_score") or 0
+    if rank <= OPENROUTER_PREMIUM_TOP_N or growth > 30 or importance > 60:
+        return OPENROUTER_MODEL_PREMIUM
+    return OPENROUTER_MODEL_TAIL
+
+
+def _analyze_cluster(cluster: dict, rank: int, prompt: str) -> tuple[dict | None, str, str]:
+    """Analyze a cluster via OpenRouter (tiered model), with a safe fallback.
+
+    If OpenRouter is configured and succeeds → use it. Otherwise fall back to the
+    legacy direct-provider routing so the pipeline keeps working unchanged.
+    """
+    if os.environ.get("OPENROUTER_API_KEY"):
+        model = _pick_cluster_model(cluster, rank)
+        result = analyze_with_openrouter(prompt, model)
+        if result:
+            return result, "openrouter", model
+        log.warning(
+            "OpenRouter failed (model=%s, rank=%d) — falling back to direct providers",
+            model, rank,
+        )
+
+    provider = _pick_provider(cluster, rank)
+    return _call_provider(provider, prompt)
+
+
 def run_llm_analysis(cur, limit: int = 15) -> int:
     """Analyze top clusters with LLMs.
 
@@ -475,8 +606,7 @@ def run_llm_analysis(cur, limit: int = 15) -> int:
             continue
 
         prompt = build_cluster_prompt(cur, cluster, articles)
-        provider = _pick_provider(cluster, rank)
-        result, used_provider, used_model = _call_provider(provider, prompt)
+        result, used_provider, used_model = _analyze_cluster(cluster, rank, prompt)
 
         if result:
             db.insert_analysis(
