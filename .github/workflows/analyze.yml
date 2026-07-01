@@ -2,7 +2,7 @@ name: TechPulse Intelligence
 
 on:
   repository_dispatch:
-    types: [ingest_complete]
+    types: [ingest_complete, generate_podcast]
   schedule:
     - cron: '0 7,13,19 * * *'    # Fallback: 1h after ingest
     - cron: '43 16 * * *'        # Temporary test: 18:43 CEST / 16:43 UTC
@@ -51,6 +51,19 @@ on:
         options:
           - 'false'
           - 'true'
+      podcast_topics:
+        description: 'On-demand podcast: comma-separated "type:id" topics, e.g. cluster:abc,serendipity:xyz (leave empty for a normal run)'
+        required: false
+        default: ''
+        type: string
+      podcast_minutes:
+        description: 'On-demand podcast: target duration in minutes'
+        required: false
+        default: '10'
+        type: choice
+        options:
+          - '10'
+          - '5'
 
 concurrency:
   group: techpulse-intelligence
@@ -125,6 +138,8 @@ jobs:
           TECHPULSE_FORCE_LLM_ANALYSIS: ${{ github.event.inputs.force_llm_analysis || 'false' }}
           TECHPULSE_SAME_THEME_THRESHOLD: ${{ github.event.inputs.same_theme_threshold || '0.68' }}
           TECHPULSE_SAME_EVENT_THRESHOLD: "0.84"
+          TECHPULSE_PODCAST_TOPICS: ${{ github.event.client_payload.topics || github.event.inputs.podcast_topics || '' }}
+          TECHPULSE_PODCAST_MINUTES: ${{ github.event.client_payload.target_minutes || github.event.inputs.podcast_minutes || '10' }}
         run: python -m pipeline
 
       - name: Dispatch signal push notifications

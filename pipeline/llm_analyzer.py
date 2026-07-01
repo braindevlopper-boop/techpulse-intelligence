@@ -17,7 +17,6 @@ import re
 from datetime import date, datetime
 
 import httpx
-
 from . import db
 from .prompt_registry import render_prompt
 from .prompt_profiles import (
@@ -197,7 +196,7 @@ Produce a JSON response with these fields:
   - "what_to_watch": array of 4-6 concrete indicators, keywords, events, filings, product launches, pricing changes, or regulatory moves to monitor next
   - "common_misreadings": array of 2-4 ways readers could misunderstand or over-interpret the story
   - "bottom_line": one strong paragraph explaining what a serious TechPulse reader should remember
-- "timeline_events": array of key events, each with: "date" (strict ISO YYYY-MM-DD only when the exact day is known, otherwise null), "title" (short event description in French), "importance" (1-10). Extract 2-5 events from the articles showing how this story evolved.
+- "timeline_events": array of key events, each with: "date" (strict ISO YYYY-MM-DD only when the exact day is known, otherwise null), "title" (short event description in French, max ~12 words), "importance" (1-10). Extract only the 2-3 MOST significant events (not every event) showing how this story evolved.
 - "epistemic": the overall epistemic status of this cluster, choose one:
   • "peer-reviewed": published research with peer review
   • "preprint": arXiv/bioRxiv working paper, not yet published
@@ -249,6 +248,29 @@ Respond with a JSON object: {{"signals": [...]}}"""
 
 # ── LLM Clients ──────────────────────────────────────────────────────────────
 
+# Retry léger pour les erreurs transitoires (429 rate limit, 503 unavailable)
+def _retryable_post(provider: str, **kwargs) -> httpx.Response:
+    import time
+    timeout = kwargs.pop("timeout", 60)
+    for attempt in range(3):
+        try:
+            resp = httpx.post(**kwargs, timeout=timeout)
+            if resp.status_code in (429, 503, 502):
+                wait = (attempt + 1) * 3
+                log.warning("%s returned %d, retrying in %ds (attempt %d)", provider, resp.status_code, wait, attempt + 1)
+                time.sleep(wait)
+                continue
+            resp.raise_for_status()
+            return resp
+        except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.ConnectError) as exc:
+            if attempt < 2:
+                wait = (attempt + 1) * 2
+                log.warning("%s error: %s, retrying in %ds", provider, exc, wait)
+                time.sleep(wait)
+                continue
+            raise
+    raise RuntimeError(f"{provider}: exhausted retries after 3 attempts")
+
 def analyze_with_deepseek(prompt: str, model: str = "deepseek-v4-flash") -> dict | None:
     """Call DeepSeek V4 API. Default: V4 Flash ($0.14/M in, $0.28/M out)."""
     api_key = os.environ.get("DEEPSEEK_API_KEY")
@@ -257,8 +279,8 @@ def analyze_with_deepseek(prompt: str, model: str = "deepseek-v4-flash") -> dict
         return None
 
     try:
-        resp = httpx.post(
-            DEEPSEEK_URL,
+        resp = _retryable_post("DeepSeek",
+            url=DEEPSEEK_URL,
             headers={"Authorization": f"Bearer {api_key}"},
             json={
                 "model": model,
@@ -269,7 +291,6 @@ def analyze_with_deepseek(prompt: str, model: str = "deepseek-v4-flash") -> dict
             },
             timeout=60,
         )
-        resp.raise_for_status()
         data = resp.json()
         text = data["choices"][0]["message"]["content"]
         return parse_llm_json(text, "DeepSeek")
@@ -286,8 +307,9 @@ def analyze_with_gemini(prompt: str) -> dict | None:
         return None
 
     try:
-        resp = httpx.post(
-            f"{GEMINI_URL}?key={api_key}",
+        resp = _retryable_post("Gemini",
+            url=f"{GEMINI_URL}?key={api_key}",
+            headers={},
             json={
                 "contents": [{"parts": [{"text": prompt}]}],
                 "generationConfig": {
@@ -298,7 +320,6 @@ def analyze_with_gemini(prompt: str) -> dict | None:
             },
             timeout=60,
         )
-        resp.raise_for_status()
         data = resp.json()
         text = data["candidates"][0]["content"]["parts"][0]["text"]
         return parse_llm_json(text, "Gemini")
@@ -315,8 +336,8 @@ def analyze_with_openai(prompt: str, model: str = "gpt-4o-mini") -> dict | None:
         return None
 
     try:
-        resp = httpx.post(
-            OPENAI_URL,
+        resp = _retryable_post("OpenAI",
+            url=OPENAI_URL,
             headers={"Authorization": f"Bearer {api_key}"},
             json={
                 "model": model,
@@ -327,7 +348,6 @@ def analyze_with_openai(prompt: str, model: str = "gpt-4o-mini") -> dict | None:
             },
             timeout=60,
         )
-        resp.raise_for_status()
         data = resp.json()
         text = data["choices"][0]["message"]["content"]
         return parse_llm_json(text, "OpenAI")
@@ -344,8 +364,8 @@ def analyze_with_grok(prompt: str, model: str = "grok-4.3") -> dict | None:
         return None
 
     try:
-        resp = httpx.post(
-            GROK_URL,
+        resp = _retryable_post("Grok",
+            url=GROK_URL,
             headers={"Authorization": f"Bearer {api_key}"},
             json={
                 "model": model,
@@ -355,7 +375,6 @@ def analyze_with_grok(prompt: str, model: str = "grok-4.3") -> dict | None:
             },
             timeout=90,
         )
-        resp.raise_for_status()
         data = resp.json()
         text = data["choices"][0]["message"]["content"]
         return parse_llm_json(text, "Grok")
@@ -516,8 +535,8 @@ def analyze_with_openrouter(prompt: str, model: str) -> dict | None:
         return None
 
     try:
-        resp = httpx.post(
-            OPENROUTER_URL,
+        resp = _retryable_post(f"OpenRouter:{model}",
+            url=OPENROUTER_URL,
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "HTTP-Referer": "https://techpulse.app",
@@ -532,7 +551,6 @@ def analyze_with_openrouter(prompt: str, model: str) -> dict | None:
             },
             timeout=90,
         )
-        resp.raise_for_status()
         data = resp.json()
         text = data["choices"][0]["message"]["content"]
         return parse_llm_json(text, f"OpenRouter:{model}")
@@ -626,9 +644,10 @@ def run_llm_analysis(cur, limit: int = 15) -> int:
                         reason=f"from cluster: {cluster['title'][:50]}",
                     )
 
-            # Insert timeline events from LLM response
+            # Insert timeline events from LLM response (capped defensively even if
+            # the model ignores the "2-3 most significant" instruction in the prompt)
             timeline_count = 0
-            for event in result.get("timeline_events", []):
+            for event in result.get("timeline_events", [])[:3]:
                 if not isinstance(event, dict) or not event.get("title"):
                     continue
                 db.insert_timeline_event(

@@ -28,11 +28,10 @@ from .sentiment_analyzer import run_sentiment_analysis
 from .article_intelligence import run_article_intelligence
 from .clusterer import run_clustering
 from .cluster_merger import MERGE_PROMPT, run_cluster_merging
-from .entity_relationships import build_entity_relationships
 from .scorer import run_scoring
 from .llm_analyzer import CLUSTER_ANALYSIS_PROMPT, WEAK_SIGNAL_PROMPT, run_llm_analysis, run_weak_signal_analysis
 from .signal_detector import detect_weak_signals
-from .podcast_generator import generate_podcast
+from .podcast_generator import generate_podcast, resolve_topics
 from .serendipity_generator import run_serendipity
 from .podcast_moments_extractor import run_podcast_moments_extraction
 from .prediction_tracker import extract_predictions_from_cluster_analysis, extract_predictions_from_podcast_moments
@@ -62,6 +61,20 @@ def should_skip_legacy_podcast() -> bool:
 
 def prompt_lab_task() -> str:
     return os.getenv("TECHPULSE_PROMPT_LAB_TASK", "").strip()
+
+
+def on_demand_podcast_topic_refs() -> list[tuple[str, str]]:
+    """Parse TECHPULSE_PODCAST_TOPICS as "type:id,type:id" (type = cluster|serendipity)."""
+    raw = os.getenv("TECHPULSE_PODCAST_TOPICS", "").strip()
+    refs = []
+    for chunk in raw.split(","):
+        chunk = chunk.strip()
+        if not chunk or ":" not in chunk:
+            continue
+        ttype, _, tid = chunk.partition(":")
+        if ttype in ("cluster", "serendipity") and tid:
+            refs.append((ttype, tid))
+    return refs
 
 
 def seed_prompt_registry(cur) -> None:
@@ -185,6 +198,20 @@ def run():
             log.info("Prompt Lab candidate: %s", candidate_id)
         return
 
+    podcast_topic_refs = on_demand_podcast_topic_refs()
+    if podcast_topic_refs:
+        target_minutes = int(os.getenv("TECHPULSE_PODCAST_MINUTES", "10") or "10")
+        log.info("On-demand podcast requested for %d topic(s), target %dmin",
+                  len(podcast_topic_refs), target_minutes)
+        with db.get_cursor() as cur:
+            topics = resolve_topics(cur, podcast_topic_refs)
+            podcast_id = generate_podcast(
+                cur, podcast_type="on_demand",
+                topics=topics, target_minutes=target_minutes,
+            )
+            log.info("On-demand podcast: %s", podcast_id or "FAILED")
+        return
+
     with db.get_cursor() as cur:
         run_id = db.insert_pipeline_run(cur, "intelligence")
         seed_prompt_registry(cur)
@@ -232,11 +259,6 @@ def run():
         log.info("Step 4: Scoring clusters...")
         with db.get_cursor() as cur:
             run_scoring(cur)
-
-        # ── Step 5: Entity relationship graph ──
-        log.info("Step 5: Building entity relationship graph...")
-        with db.get_cursor() as cur:
-            build_entity_relationships(cur)
 
         # ── Step 6: LLM Analysis ──
         log.info("Step 6: Running LLM analysis on top clusters...")

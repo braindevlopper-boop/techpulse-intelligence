@@ -46,7 +46,7 @@ Réponds uniquement avec un JSON valide, sans markdown.
 Schéma attendu:
 {{
   "language": "fr" | "en" | "other",
-  "canonical_title": "titre nettoyé et factuel, sans HTML, clickbait ni source",
+  "canonical_title": "titre nettoyé, factuel et entièrement traduit en français (important !), sans HTML, clickbait ni source",
   "summary": "résumé en français en 1-2 phrases",
   "article_type": "news" | "analysis" | "opinion" | "research" | "press_release" | "market_note" | "tutorial" | "social_discussion" | "other",
   "primary_domain": "ai" | "software" | "semiconductors" | "cloud" | "cybersecurity" | "fintech" | "crypto" | "markets" | "macroeconomics" | "energy" | "space" | "defense" | "regulation" | "startups" | "consumer_tech" | "gaming" | "science" | "other",

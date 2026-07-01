@@ -680,6 +680,43 @@ def fetch_top_clusters(cur, limit: int = 20) -> list[dict]:
     return cur.fetchall()
 
 
+def fetch_clusters_by_ids(cur, cluster_ids: list[str]) -> list[dict]:
+    """Fetch specific clusters by id, preserving the given order (on-demand podcast)."""
+    if not cluster_ids:
+        return []
+    cur.execute(
+        """
+        SELECT c.id, c.title, c.article_count, c.source_diversity,
+               c.importance_score, c.growth_score, c.novelty_score,
+               c.first_seen_at, c.last_updated_at
+        FROM clusters c
+        WHERE c.id = ANY(%s)
+        """,
+        (cluster_ids,),
+    )
+    rows = cur.fetchall()
+    by_id = {row["id"]: row for row in rows}
+    return [by_id[cid] for cid in cluster_ids if cid in by_id]
+
+
+def fetch_serendipity_cards_by_ids(cur, card_ids: list[str]) -> list[dict]:
+    """Fetch specific serendipity (science) cards by id, preserving order (on-demand podcast)."""
+    if not card_ids:
+        return []
+    cur.execute(
+        """
+        SELECT id, title_choc, enigme, personnage, concept, so_what,
+               paper_title, domain, source_url
+        FROM serendipity_cards
+        WHERE id = ANY(%s)
+        """,
+        (card_ids,),
+    )
+    rows = cur.fetchall()
+    by_id = {row["id"]: row for row in rows}
+    return [by_id[cid] for cid in card_ids if cid in by_id]
+
+
 def fetch_cluster_articles(cur, cluster_id: str) -> list[dict]:
     """Get all articles in a cluster."""
     cur.execute(
@@ -746,137 +783,6 @@ def insert_article_entity(cur, article_id: str, entity_id: str,
     )
 
 
-def has_entity_relationships_table(cur) -> bool:
-    cur.execute("SELECT to_regclass('public.entity_relationships') AS table_name")
-    row = cur.fetchone()
-    return bool(row and row.get("table_name"))
-
-
-def fetch_entity_relationship_candidates(cur, limit: int = 800) -> list[dict]:
-    """Build entity-pair candidates from cooccurrences inside active clusters."""
-    cur.execute(
-        """
-        WITH cluster_entities AS (
-          SELECT
-            c.id AS cluster_id,
-            c.title AS cluster_title,
-            c.article_count,
-            c.source_diversity,
-            c.first_seen_at,
-            c.last_updated_at,
-            e.id AS entity_id,
-            e.name AS entity_name,
-            e.type AS entity_type,
-            COUNT(DISTINCT ae.article_id) AS entity_article_count
-          FROM clusters c
-          JOIN cluster_articles ca ON ca.cluster_id = c.id
-          JOIN article_entities ae ON ae.article_id = ca.article_id
-          JOIN entities e ON e.id = ae.entity_id
-          WHERE c.status IN ('active', 'growing', 'peak')
-            AND e.normalized_name NOT IN (
-              'ai', 'us', 'u.s.', 'u. s.', 'usa', 'uk', 'reuters', 'bloomberg',
-              'bloomberg tech', 'bloomberg technology', 'hacker news',
-              'techcrunch', 'the verge', 'ars technica', 'cnbc',
-              'youtube', 'internet', 'technology', 'tech', 'data', 'software'
-            )
-          GROUP BY c.id, e.id
-        ),
-        pair_clusters AS (
-          SELECT
-            CASE WHEN ce1.entity_id < ce2.entity_id THEN ce1.entity_id ELSE ce2.entity_id END AS source_entity_id,
-            CASE WHEN ce1.entity_id < ce2.entity_id THEN ce2.entity_id ELSE ce1.entity_id END AS target_entity_id,
-            CASE WHEN ce1.entity_id < ce2.entity_id THEN ce1.entity_type ELSE ce2.entity_type END AS source_entity_type,
-            CASE WHEN ce1.entity_id < ce2.entity_id THEN ce2.entity_type ELSE ce1.entity_type END AS target_entity_type,
-            ce1.cluster_id,
-            ce1.cluster_title,
-            ce1.article_count,
-            ce1.source_diversity,
-            ce1.first_seen_at,
-            ce1.last_updated_at,
-            ce1.entity_article_count + ce2.entity_article_count AS entity_article_mentions
-          FROM cluster_entities ce1
-          JOIN cluster_entities ce2
-            ON ce1.cluster_id = ce2.cluster_id
-           AND ce1.entity_id < ce2.entity_id
-        )
-        SELECT
-          source_entity_id,
-          target_entity_id,
-          source_entity_type,
-          target_entity_type,
-          COUNT(DISTINCT cluster_id) AS evidence_count,
-          ARRAY_AGG(DISTINCT cluster_id) AS evidence_cluster_ids,
-          COALESCE(SUM(entity_article_mentions), 0) AS article_signal,
-          COALESCE(SUM(source_diversity), 0) AS source_signal,
-          MIN(first_seen_at) AS first_seen_at,
-          MAX(last_updated_at) AS last_seen_at,
-          JSONB_AGG(
-            JSONB_BUILD_OBJECT(
-              'cluster_id', cluster_id,
-              'title', cluster_title,
-              'article_count', article_count,
-              'source_diversity', source_diversity,
-              'last_updated_at', last_updated_at
-            )
-            ORDER BY last_updated_at DESC NULLS LAST
-          ) AS evidence_clusters
-        FROM pair_clusters
-        GROUP BY source_entity_id, target_entity_id, source_entity_type, target_entity_type
-        ORDER BY
-          COUNT(DISTINCT cluster_id) DESC,
-          COALESCE(SUM(source_diversity), 0) DESC,
-          COALESCE(SUM(entity_article_mentions), 0) DESC
-        LIMIT %s
-        """,
-        (limit,),
-    )
-    return cur.fetchall()
-
-
-def replace_entity_relationships(cur, relationships: list[dict]) -> int:
-    """Replace graph relationships with the latest cluster-derived snapshot."""
-    cur.execute("DELETE FROM entity_relationships")
-    if not relationships:
-        return 0
-
-    psycopg2.extras.execute_batch(
-        cur,
-        """
-        INSERT INTO entity_relationships (
-          id, source_entity_id, target_entity_id, relation_type,
-          strength_score, evidence_count, evidence_cluster_ids,
-          evidence_article_ids, evidence_summary, first_seen_at, last_seen_at,
-          updated_at
-        )
-        VALUES (
-          %(id)s, %(source_entity_id)s, %(target_entity_id)s, %(relation_type)s,
-          %(strength_score)s, %(evidence_count)s, %(evidence_cluster_ids)s::jsonb,
-          %(evidence_article_ids)s::jsonb, %(evidence_summary)s::jsonb,
-          %(first_seen_at)s, %(last_seen_at)s, NOW()
-        )
-        ON CONFLICT (source_entity_id, target_entity_id, relation_type) DO UPDATE SET
-          strength_score = EXCLUDED.strength_score,
-          evidence_count = EXCLUDED.evidence_count,
-          evidence_cluster_ids = EXCLUDED.evidence_cluster_ids,
-          evidence_article_ids = EXCLUDED.evidence_article_ids,
-          evidence_summary = EXCLUDED.evidence_summary,
-          first_seen_at = EXCLUDED.first_seen_at,
-          last_seen_at = EXCLUDED.last_seen_at,
-          updated_at = NOW()
-        """,
-        [
-            {
-                **relationship,
-                "id": relationship.get("id") or gen_id(),
-                "evidence_cluster_ids": json.dumps(relationship.get("evidence_cluster_ids") or []),
-                "evidence_article_ids": json.dumps(relationship.get("evidence_article_ids") or []),
-                "evidence_summary": json.dumps(relationship.get("evidence_summary") or {}, default=str),
-            }
-            for relationship in relationships
-        ],
-        page_size=100,
-    )
-    return len(relationships)
 
 
 def upsert_article_intelligence(cur, article_id: str, provider: str, model: str,
