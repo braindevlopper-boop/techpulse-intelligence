@@ -6,6 +6,7 @@ no-op context manager so call sites that did `with db.get_cursor() as cur:`
 still work — `cur` is unused (routes carry no transaction/session state).
 """
 
+import json
 import logging
 import os
 import time
@@ -62,6 +63,20 @@ def _request(method: str, path: str, *, params: dict | None = None,
     raise RuntimeError(f"Worker request failed: {method} {path}: {last_exc}")
 
 
+def _stringify_json_fields(items: list[dict], fields: tuple[str, ...]) -> list[dict]:
+    """The Worker binds these fields directly into a D1 TEXT column — they must
+    be JSON-encoded strings, not raw Python lists/dicts, or env.DB bind() fails."""
+    out = []
+    for item in items:
+        item = dict(item)
+        for field in fields:
+            value = item.get(field)
+            if value is not None and not isinstance(value, str):
+                item[field] = json.dumps(value)
+        out.append(item)
+    return out
+
+
 @contextmanager
 def get_cursor():
     """Kept for call-site compatibility (`with db.get_cursor() as cur:`).
@@ -86,6 +101,7 @@ def fetch_processed_articles(cur=None, hours: int = 72, limit: int = 500) -> lis
 
 def push_clusters(clusters: list[dict]) -> dict:
     """Upsert clusters + article links. Max 200 per call (chunked here)."""
+    clusters = _stringify_json_fields(clusters, ("keywords_json",))
     total = 0
     for i in range(0, len(clusters), 200):
         chunk = clusters[i:i + 200]
@@ -98,6 +114,7 @@ def push_clusters(clusters: list[dict]) -> dict:
 
 def push_cluster_analyses(analyses: list[dict]) -> dict:
     """Upsert cluster_analyses. Max 100 per call (chunked here)."""
+    analyses = _stringify_json_fields(analyses, ("keywords_json",))
     total = 0
     for i in range(0, len(analyses), 100):
         chunk = analyses[i:i + 100]
@@ -110,6 +127,7 @@ def push_cluster_analyses(analyses: list[dict]) -> dict:
 
 def push_article_enrichment(articles: list[dict]) -> dict:
     """Upsert lightweight per-article enrichment. Max 300 per call (chunked)."""
+    articles = _stringify_json_fields(articles, ("keywords_json",))
     total = 0
     for i in range(0, len(articles), 300):
         chunk = articles[i:i + 300]
@@ -158,7 +176,7 @@ def insert_pipeline_run(cur, pipeline_type: str) -> str:
 def complete_pipeline_run(cur, run_id: str, stats: dict) -> None:
     _request("PATCH", f"/pipeline/jobs/{run_id}", json_body={
         "status": "completed",
-        "stats_json": stats,
+        "stats_json": json.dumps(stats),
     })
 
 
