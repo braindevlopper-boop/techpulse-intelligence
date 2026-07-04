@@ -9,19 +9,6 @@ on:
     - cron: '30 7 * * *'         # 09:30 Paris (CEST) — run de test
   workflow_dispatch:
     inputs:
-      recluster_all:
-        description: 'Rebuild all clusters from existing 1024-dim embeddings'
-        required: false
-        default: 'false'
-        type: choice
-        options:
-          - 'false'
-          - 'true'
-      same_theme_threshold:
-        description: 'BGE-M3 clustering threshold for same theme'
-        required: false
-        default: '0.68'
-        type: string
       article_llm_limit:
         description: 'Max articles to enrich with Article Intelligence in this run'
         required: false
@@ -35,35 +22,11 @@ on:
         options:
           - 'false'
           - 'true'
-      skip_hf_ml:
-        description: 'Skip Hugging Face NER/classification/keywords/sentiment steps'
+      cluster_window_hours:
+        description: 'Time window (hours) for URL/title/keyword dedup clustering'
         required: false
-        default: 'true'
-        type: choice
-        options:
-          - 'true'
-          - 'false'
-      refresh_hf_cache:
-        description: 'Download missing Hugging Face models and upload them to R2 cache'
-        required: false
-        default: 'false'
-        type: choice
-        options:
-          - 'false'
-          - 'true'
-      podcast_topics:
-        description: 'On-demand podcast: comma-separated "type:id" topics, e.g. cluster:abc,serendipity:xyz (leave empty for a normal run)'
-        required: false
-        default: ''
+        default: '72'
         type: string
-      podcast_minutes:
-        description: 'On-demand podcast: target duration in minutes'
-        required: false
-        default: '10'
-        type: choice
-        options:
-          - '10'
-          - '5'
 
 concurrency:
   group: techpulse-intelligence
@@ -76,7 +39,6 @@ jobs:
 
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-      HF_HUB_DISABLE_PROGRESS_BARS: "1"
 
     steps:
       - uses: actions/checkout@v4
@@ -86,34 +48,13 @@ jobs:
           python-version: '3.12'
           cache: 'pip'
 
-      - name: Cache Hugging Face models
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/huggingface
-          key: hf-models-v1-${{ runner.os }}
-          restore-keys: |
-            hf-models-v1-
-
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
-      - name: Preload Hugging Face models
-        if: ${{ (github.event.inputs.recluster_all || 'false') != 'true' && (github.event.inputs.skip_hf_ml || 'true') != 'true' }}
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          HF_HUB_OFFLINE: ${{ (github.event.inputs.refresh_hf_cache || 'false') == 'true' && '0' || '1' }}
-          TECHPULSE_HF_DOWNLOAD_MISSING: ${{ (github.event.inputs.refresh_hf_cache || 'false') == 'true' && 'true' || 'false' }}
-          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          HF_R2_BUCKET: ${{ secrets.R2_BUCKET }}
-          HF_R2_PREFIX: hf-model-cache/v1
-        run: python -m pipeline.hf_preload
-
       - name: Run intelligence pipeline
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
+          TECHPULSE_WORKER_URL: ${{ secrets.TECHPULSE_WORKER_URL }}
+          TECHPULSE_WORKER_SECRET: ${{ secrets.TECHPULSE_WORKER_SECRET }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
@@ -128,18 +69,9 @@ jobs:
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
           R2_PUBLIC_URL: ${{ secrets.R2_PUBLIC_URL }}
           FIREBASE_SERVER_KEY: ${{ secrets.FIREBASE_SERVER_KEY }}
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          HF_HUB_OFFLINE: "1"
-          TECHPULSE_RECLUSTER_ALL: ${{ github.event.inputs.recluster_all || 'false' }}
-          TECHPULSE_SKIP_HF_ML: ${{ ((github.event.inputs.skip_hf_ml || 'true') == 'true' || (github.event.inputs.recluster_all || 'false') == 'true') && 'true' || 'false' }}
-          TECHPULSE_ALLOW_HF_FAILURE: "true"
-          TECHPULSE_SKIP_LEGACY_PODCAST: "true"
           TECHPULSE_ARTICLE_LLM_LIMIT: ${{ github.event.inputs.article_llm_limit || '60' }}
           TECHPULSE_FORCE_LLM_ANALYSIS: ${{ github.event.inputs.force_llm_analysis || 'false' }}
-          TECHPULSE_SAME_THEME_THRESHOLD: ${{ github.event.inputs.same_theme_threshold || '0.68' }}
-          TECHPULSE_SAME_EVENT_THRESHOLD: "0.84"
-          TECHPULSE_PODCAST_TOPICS: ${{ github.event.client_payload.topics || github.event.inputs.podcast_topics || '' }}
-          TECHPULSE_PODCAST_MINUTES: ${{ github.event.client_payload.target_minutes || github.event.inputs.podcast_minutes || '10' }}
+          TECHPULSE_CLUSTER_WINDOW_HOURS: ${{ github.event.inputs.cluster_window_hours || '72' }}
         run: python -m pipeline
 
       - name: Dispatch signal push notifications

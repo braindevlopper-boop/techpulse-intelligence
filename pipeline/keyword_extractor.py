@@ -1,66 +1,16 @@
-"""Keyword extraction using KeyBERT."""
+"""KeyBERT keyword discovery — disabled after the D1 migration.
+
+Wrote to Neon's standalone `keywords` table, which has no D1 route. Article-
+and cluster-level keywords now flow only through keywords_json on the
+/pipeline/articles/enrich and /pipeline/clusters payloads. Disabled as a
+clean no-op (was already gated by TECHPULSE_SKIP_HF_ML=true in production).
+"""
 
 import logging
-from keybert import KeyBERT
-
-from . import db
-from .hf_utils import handle_hf_unavailable, hf_steps_disabled
 
 log = logging.getLogger(__name__)
 
-_kw_model = None
 
-
-def _get_model():
-    global _kw_model
-    if _kw_model is None:
-        log.info("Loading KeyBERT model...")
-        _kw_model = KeyBERT("BAAI/bge-small-en-v1.5")
-        log.info("KeyBERT loaded")
-    return _kw_model
-
-
-def extract_keywords(text: str, top_n: int = 8) -> list[tuple[str, float]]:
-    """Extract top keywords from text."""
-    model = _get_model()
-    return model.extract_keywords(
-        text,
-        keyphrase_ngram_range=(1, 3),
-        stop_words="english",
-        top_n=top_n,
-        use_mmr=True,
-        diversity=0.5,
-    )
-
-
-def run_keyword_extraction(cur, articles: list[dict]) -> int:
-    """Extract keywords from articles and store in DB."""
-    if hf_steps_disabled():
-        log.info("Keyword extraction skipped: TECHPULSE_SKIP_HF_ML enabled")
-        return 0
-
-    try:
-        _get_model()
-    except Exception as exc:
-        if handle_hf_unavailable(log, "Keyword extraction", exc):
-            return 0
-
-    total = 0
-
-    for article in articles:
-        text = article.get("full_text") or f"{article['title']} {article.get('description', '')}"
-        if len(text) < 30:
-            continue
-
-        keywords = extract_keywords(text[:3000])
-        for kw, score in keywords:
-            if score < 0.3 or len(kw) < 3:
-                continue
-            db.upsert_keyword(
-                cur, kw, category="concept", source="keybert",
-                reason=f"from article: {article['title'][:50]}",
-            )
-            total += 1
-
-    log.info("Extracted %d keywords from %d articles", total, len(articles))
-    return total
+def run_keyword_extraction(*_args, **_kwargs) -> int:
+    log.warning("Keyword extraction skipped: standalone keywords table has no D1 equivalent")
+    return 0

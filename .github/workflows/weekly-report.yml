@@ -26,7 +26,8 @@ jobs:
 
       - name: Generate weekly podcast
         env:
-          NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
+          TECHPULSE_WORKER_URL: ${{ secrets.TECHPULSE_WORKER_URL }}
+          TECHPULSE_WORKER_SECRET: ${{ secrets.TECHPULSE_WORKER_SECRET }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -36,16 +37,17 @@ jobs:
           FIREBASE_SERVER_KEY: ${{ secrets.FIREBASE_SERVER_KEY }}
         run: |
           python -c "
-          from pipeline.db import get_cursor
           from pipeline.podcast_generator import generate_podcast
           from pipeline.notifier import send_fcm_notification
 
-          with get_cursor() as cur:
-              pid = generate_podcast(cur, podcast_type='weekly')
-              if pid:
-                  send_fcm_notification(
-                      'TechPulse — Résumé de la semaine',
-                      'Ton podcast hebdo est prêt',
-                      {'type': 'weekly_podcast'}
-                  )
+          # podcast_generator is disabled after the D1 migration (no D1 route
+          # for podcasts/serendipity scoring) — this now logs a warning and
+          # no-ops. Kept as a workflow so re-enabling later is a one-file change.
+          pid = generate_podcast(None, podcast_type='weekly')
+          if pid:
+              send_fcm_notification(
+                  'TechPulse — Résumé de la semaine',
+                  'Ton podcast hebdo est prêt',
+                  {'type': 'weekly_podcast'}
+              )
           "

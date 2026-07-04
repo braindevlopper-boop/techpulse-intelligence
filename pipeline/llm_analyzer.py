@@ -389,12 +389,11 @@ def build_cluster_prompt(cur, cluster: dict, articles: list[dict]) -> str:
     """Build the analysis prompt for a cluster, adapted to the cluster's domain."""
     articles_text = ""
     for i, a in enumerate(articles[:8], 1):
-        desc = a.get("description") or ""
-        full_text = (a.get("full_text") or "").strip()
-        excerpt = full_text[:1200] if full_text else desc[:500]
+        content_text = (a.get("content") or "").strip()
+        excerpt = content_text[:1200]
         pub = a.get("published_at", "")
         date_str = str(pub)[:10] if pub else "unknown"
-        articles_text += f"\n{i}. [{a['source_name']}] ({date_str}) {a['title']}\n   {desc[:200]}\n"
+        articles_text += f"\n{i}. [{a.get('source_name', '')}] ({date_str}) {a.get('title', '')}\n"
         if excerpt:
             articles_text += f"   Excerpt: {excerpt}\n"
 
@@ -402,11 +401,10 @@ def build_cluster_prompt(cur, cluster: dict, articles: list[dict]) -> str:
 
     # Détecter le domaine du cluster
     cluster_title = cluster.get("title") or ""
-    cluster_summary = cluster.get("summary") or ""
-    cluster_theme = cluster.get("main_theme") or ""
+    cluster_theme = cluster.get("theme") or ""
     domain = detect_domain(
         title=cluster_title,
-        description=cluster_summary,
+        description="",
         theme=cluster_theme,
     )
     profile = get_profile(domain)
@@ -592,8 +590,33 @@ def _analyze_cluster(cluster: dict, rank: int, prompt: str) -> tuple[dict | None
     return _call_provider(provider, prompt)
 
 
-def run_llm_analysis(cur, limit: int = 15) -> int:
-    """Analyze top clusters with LLMs.
+def _map_analysis_for_push(cluster_id: str, result: dict, provider: str, model: str) -> dict:
+    """Map the rich LLM JSON onto the 7 fields accepted by
+    POST /pipeline/cluster-analyses. Everything else (pedagogical_analysis,
+    timeline_events, predictions, counter_analysis, ...) has no D1 column yet
+    and is dropped here; only the summary/impact/reliability/risk fields ship."""
+    why_interesting = result.get("why_it_matters") or ""
+    reliability = result.get("epistemic") or "presse"
+    keywords = result.get("suggested_keywords") or []
+    return {
+        "cluster_id": cluster_id,
+        "summary_fr": (result.get("summary") or "")[:2000],
+        "impact_fr": why_interesting[:2000],
+        "why_interesting_fr": why_interesting[:2000],
+        "reliability": reliability,
+        "risk_level": result.get("risk_level") or "medium",
+        "keywords_json": keywords[:10],
+        "model_used": f"{provider}:{model}",
+    }
+
+
+def run_llm_analysis(clusters: list[dict], limit: int = 15) -> int:
+    """Analyze the top clusters (by article count) with LLMs and push results
+    to D1 via POST /pipeline/cluster-analyses.
+
+    `clusters` is the post-merge cluster payload from clusterer.py /
+    cluster_merger.py (each with article_hashes + hydrated article dicts
+    attached by the caller as cluster["_articles"]).
 
     Cost breakdown for 15 clusters:
       - 2 via Grok 4.3:      ~$0.008/day
@@ -601,102 +624,35 @@ def run_llm_analysis(cur, limit: int = 15) -> int:
       - 10 via DeepSeek V4:  ~$0.004/day
       Total: ~$0.014/day = ~$0.42/month
     """
-    top_clusters = db.fetch_top_clusters(cur, limit=limit)
+    ranked = sorted(clusters, key=lambda c: len(c.get("article_hashes") or []), reverse=True)[:limit]
     analyzed = 0
-    force = os.environ.get("TECHPULSE_FORCE_LLM_ANALYSIS", "").lower() == "true"
+    to_push = []
 
-    for rank, cluster in enumerate(top_clusters, 1):
-        # Skip if already analyzed recently
-        if not force:
-            cur.execute(
-                """
-                SELECT id FROM ai_analyses
-                WHERE target_type = 'cluster' AND target_id = %s
-                  AND created_at > NOW() - INTERVAL '12 hours'
-                """,
-                (cluster["id"],),
-            )
-            if cur.fetchone():
-                continue
-
-        articles = db.fetch_cluster_articles(cur, cluster["id"])
+    for rank, cluster in enumerate(ranked, 1):
+        articles = cluster.get("_articles") or []
         if len(articles) < 2:
             continue
 
-        prompt = build_cluster_prompt(cur, cluster, articles)
+        prompt = build_cluster_prompt(None, cluster, articles)
         result, used_provider, used_model = _analyze_cluster(cluster, rank, prompt)
 
         if result:
-            db.insert_analysis(
-                cur,
-                target_type="cluster",
-                target_id=cluster["id"],
-                provider=used_provider,
-                model=used_model,
-                analysis_type="full",
-                content=result,
-            )
-
-            if result.get("suggested_keywords"):
-                for kw in result["suggested_keywords"]:
-                    db.upsert_keyword(
-                        cur, kw, category="trend", source="llm",
-                        reason=f"from cluster: {cluster['title'][:50]}",
-                    )
-
-            # Insert timeline events from LLM response (capped defensively even if
-            # the model ignores the "2-3 most significant" instruction in the prompt)
-            timeline_count = 0
-            for event in result.get("timeline_events", [])[:3]:
-                if not isinstance(event, dict) or not event.get("title"):
-                    continue
-                db.insert_timeline_event(
-                    cur,
-                    cluster_id=cluster["id"],
-                    title=event["title"],
-                    description=None,
-                    event_date=_safe_iso_date(event.get("date")),
-                    importance=_safe_importance(event.get("importance")),
-                )
-                timeline_count += 1
-
+            to_push.append(_map_analysis_for_push(cluster["id"], result, used_provider, used_model))
             analyzed += 1
-            log.info("Analyzed [%s] cluster #%d: %s (%d timeline events)",
-                     used_provider, rank, cluster["title"][:50], timeline_count)
+            log.info("Analyzed [%s] cluster #%d: %s", used_provider, rank, cluster["title"][:50])
+
+    if to_push:
+        pushed = db.push_cluster_analyses(to_push)
+        log.info("Pushed %s cluster analyses to Worker", pushed)
 
     log.info("LLM analysis: %d clusters analyzed", analyzed)
     return analyzed
 
 
-def run_weak_signal_analysis(cur) -> dict | None:
-    """Run Grok 4.3 deep analysis on all clusters to find hidden signals.
-
-    Called once per day — uses the most expensive model for maximum insight.
-    """
-    clusters = db.fetch_top_clusters(cur, limit=30)
-    if len(clusters) < 5:
-        log.info("Not enough clusters for weak signal analysis")
-        return None
-
-    prompt = build_weak_signal_prompt(cur, clusters)
-    log.info("Running Grok 4.3 weak signal analysis on %d clusters...", len(clusters))
-
-    result = analyze_with_grok(prompt)
-    if not result:
-        log.warning("Grok failed, falling back to DeepSeek V4 Pro")
-        result = analyze_with_deepseek(prompt, model="deepseek-v4-pro")
-
-    if result:
-        db.insert_analysis(
-            cur,
-            target_type="daily_digest",
-            target_id="weak_signals",
-            provider="grok" if result else "deepseek",
-            model="grok-4.3",
-            analysis_type="weak_signal",
-            content=result,
-        )
-        log.info("Weak signal analysis complete: %d signals found",
-                 len(result.get("signals", [])))
-
-    return result
+def run_weak_signal_analysis(clusters: list[dict]) -> dict | None:
+    """Weak-signal digest generation is disabled: there is no D1 route/table
+    for daily_digest analyses (ai_analyses target_type='daily_digest' had no
+    D1 equivalent per the migration contract). Kept as a log-only skip so
+    callers don't need to change."""
+    log.info("Weak signal analysis skipped: no D1 route for daily_digest analyses")
+    return None

@@ -1,13 +1,13 @@
 """Pass 2 — LLM-based cluster merging.
 
-After the embedding-based clustering (Pass 1), many clusters cover
-the same story with slightly different wording. This module sends
-cluster titles to DeepSeek V4 Flash and asks it to group them.
+After the URL/title/keyword dedup pass (clusterer.py), some clusters still
+cover the same story under different wording. This sends cluster titles to
+DeepSeek V4 Flash and asks it to group them; merges are re-pushed to the
+Worker as a single cluster with the combined article_hashes.
 
 Cost: ~$0.002 per run (one API call with all cluster titles).
 """
 
-import json
 import logging
 
 from . import db
@@ -26,12 +26,10 @@ Ton travail : identifier les clusters qui parlent du MÊME événement ou de la 
 
 Règles :
 - Ne fusionne que les doublons ou variantes rédactionnelles du même événement.
-- Si les fingerprints/hints décrivent des événements différents, ne fusionne pas.
 - Ne crée jamais de panier large comme "Global AI governance", "latest developments", "financial news" ou "industry challenges".
 - OpenAI policy, Trump executive order, US House AI bill et EU sovereignty = liés mais différents → NE PAS fusionner.
 - SpaceX IPO price, SpaceX revenue forecast et Google compute deal = liés mais différents → NE PAS fusionner.
 - Summer Game Fest, Xbox Showcase et GTA VI release calendar = liés gaming mais différents → NE PAS fusionner.
-- Deux titres sur les mêmes fuites ISS et le même shelter Dragon = même histoire → fusionner.
 - Un cluster seul qui ne ressemble à aucun autre reste tel quel
 
 Réponds avec un JSON :
@@ -48,22 +46,17 @@ Réponds avec un JSON :
 Ne retourne QUE les groupes à fusionner. Les clusters isolés ne doivent pas apparaître."""
 
 
-def build_merge_prompt(cur, clusters: list[dict]) -> str:
+def build_merge_prompt(clusters: list[dict]) -> str:
     """Build the merge prompt with all cluster titles."""
     clusters_text = ""
     for c in clusters:
-        fingerprints = ", ".join(c.get("event_fingerprints") or [])
-        hints = ", ".join(c.get("cluster_hints") or [])
-        topics = ", ".join(c.get("topics") or [])
         clusters_text += (
-            f"- ID: {c['id']} | Articles: {c['article_count']} | \"{c['title']}\"\n"
-            f"  topics: {topics or 'n/a'}\n"
-            f"  fingerprints: {fingerprints or 'n/a'}\n"
-            f"  hints: {hints or 'n/a'}\n"
+            f"- ID: {c['id']} | Articles: {len(c.get('article_hashes') or [])} | \"{c['title']}\"\n"
+            f"  theme: {c.get('theme') or 'n/a'}\n"
         )
 
     rendered = render_prompt(
-        cur,
+        None,
         task="cluster_merge",
         theme="general",
         fallback_template=MERGE_PROMPT,
@@ -79,124 +72,21 @@ def build_merge_prompt(cur, clusters: list[dict]) -> str:
     return rendered.text
 
 
-def execute_merges(cur, merge_groups: list[dict]) -> int:
-    """Execute the LLM-suggested merges in the database."""
-    total_merged = 0
+def run_cluster_merging(clusters: list[dict]) -> tuple[list[dict], int]:
+    """Ask the LLM to suggest merges, apply them in-memory, return the final
+    cluster list (post-merge) plus how many merges were applied.
 
-    for group in merge_groups:
-        cluster_ids = group.get("cluster_ids", [])
-        new_title = group.get("merged_title", "")
-
-        if len(cluster_ids) < 2 or not new_title:
-            continue
-
-        # Pick the cluster with the most articles as the target
-        candidates = []
-        for cid in cluster_ids:
-            cur.execute(
-                "SELECT id, article_count FROM clusters WHERE id = %s",
-                (cid,),
-            )
-            row = cur.fetchone()
-            if row:
-                candidates.append(row)
-
-        if len(candidates) < 2:
-            continue
-
-        candidates.sort(key=lambda x: x["article_count"], reverse=True)
-        target_id = candidates[0]["id"]
-        source_ids = [c["id"] for c in candidates[1:]]
-
-        # Move articles from source clusters to target
-        for source_id in source_ids:
-            # Update articles table
-            cur.execute(
-                "UPDATE articles SET cluster_id = %s WHERE cluster_id = %s",
-                (target_id, source_id),
-            )
-
-            # Move cluster_articles entries
-            cur.execute(
-                "UPDATE cluster_articles SET cluster_id = %s WHERE cluster_id = %s",
-                (target_id, source_id),
-            )
-
-            # Move timeline events
-            cur.execute(
-                "UPDATE timeline_events SET cluster_id = %s WHERE cluster_id = %s",
-                (target_id, source_id),
-            )
-
-            # Delete the emptied cluster
-            cur.execute("DELETE FROM clusters WHERE id = %s", (source_id,))
-
-        # Update the target cluster
-        cur.execute(
-            """
-            UPDATE clusters
-            SET title = %s,
-                article_count = (
-                    SELECT COUNT(*) FROM cluster_articles WHERE cluster_id = %s
-                ),
-                source_diversity = (
-                    SELECT COUNT(DISTINCT a.source_name)
-                    FROM articles a WHERE a.cluster_id = %s
-                ),
-                last_updated_at = NOW()
-            WHERE id = %s
-            """,
-            (new_title, target_id, target_id, target_id),
-        )
-
-        merged_count = len(source_ids)
-        total_merged += merged_count
-        log.info("Merged %d clusters → \"%s\"", merged_count + 1, new_title)
-
-    return total_merged
-
-
-def run_cluster_merging(cur) -> int:
-    """Run LLM-based cluster merging (Pass 2).
-
-    Only processes clusters with 2+ articles to keep the prompt short.
+    `clusters` is the same payload shape pushed by clusterer.py (id, title,
+    theme, dedup_title, keywords_json, article_hashes, founder_hash, status).
     """
-    # Only send clusters with 2+ articles to keep prompt short
-    cur.execute(
-        """
-        SELECT c.id, c.title, c.article_count, c.source_diversity,
-               COALESCE(
-                 ARRAY_AGG(DISTINCT ai.topic) FILTER (WHERE ai.topic IS NOT NULL),
-                 ARRAY[]::text[]
-               ) AS topics,
-               COALESCE(
-                 ARRAY_AGG(DISTINCT ai.event_fingerprint)
-                   FILTER (WHERE ai.event_fingerprint IS NOT NULL),
-                 ARRAY[]::text[]
-               ) AS event_fingerprints,
-               COALESCE(
-                 ARRAY_AGG(DISTINCT ai.cluster_hint)
-                   FILTER (WHERE ai.cluster_hint IS NOT NULL),
-                 ARRAY[]::text[]
-               ) AS cluster_hints
-        FROM clusters c
-        LEFT JOIN cluster_articles ca ON ca.cluster_id = c.id
-        LEFT JOIN article_intelligence ai ON ai.article_id = ca.article_id
-        WHERE c.status IN ('active', 'growing')
-          AND c.article_count >= 2
-        GROUP BY c.id
-        ORDER BY c.article_count DESC
-        LIMIT 60
-        """,
-    )
-    clusters = cur.fetchall()
+    multi_article = [c for c in clusters if len(c.get("article_hashes") or []) >= 1]
+    if len(multi_article) < 3:
+        log.info("Too few clusters for merging (%d)", len(multi_article))
+        return clusters, 0
 
-    if len(clusters) < 3:
-        log.info("Too few multi-article clusters for merging (%d)", len(clusters))
-        return 0
-
-    log.info("Running LLM cluster merge on %d clusters (2+ articles)...", len(clusters))
-    prompt = build_merge_prompt(cur, clusters)
+    candidates = sorted(clusters, key=lambda c: len(c.get("article_hashes") or []), reverse=True)[:60]
+    log.info("Running LLM cluster merge on %d clusters...", len(candidates))
+    prompt = build_merge_prompt(candidates)
 
     result = analyze_with_deepseek(prompt, model="deepseek-v4-flash")
     if not result:
@@ -204,19 +94,46 @@ def run_cluster_merging(cur) -> int:
         result = analyze_with_gemini(prompt)
     if not result:
         log.warning("LLM merge failed on all providers, skipping")
-        return 0
+        return clusters, 0
 
     merge_groups = result.get("merge_groups", [])
     if not merge_groups:
         log.info("LLM found no clusters to merge")
-        return 0
+        return clusters, 0
 
-    log.info("LLM suggests %d merge groups", len(merge_groups))
-    merged = execute_merges(cur, merge_groups)
+    by_id = {c["id"]: c for c in clusters}
+    merged_away = set()
+    total_merged = 0
 
-    # Update final cluster count
-    cur.execute("SELECT COUNT(*) as c FROM clusters WHERE status IN ('active', 'growing')")
-    remaining = cur.fetchone()["c"]
-    log.info("Cluster merging done: %d merges, %d clusters remaining", merged, remaining)
+    for group in merge_groups:
+        cluster_ids = [cid for cid in group.get("cluster_ids", []) if cid in by_id]
+        new_title = group.get("merged_title", "")
+        if len(cluster_ids) < 2 or not new_title:
+            continue
 
-    return merged
+        cluster_ids = [cid for cid in cluster_ids if cid not in merged_away]
+        if len(cluster_ids) < 2:
+            continue
+
+        ranked = sorted(cluster_ids, key=lambda cid: len(by_id[cid].get("article_hashes") or []), reverse=True)
+        target_id = ranked[0]
+        source_ids = ranked[1:]
+
+        target = by_id[target_id]
+        target["title"] = new_title[:200]
+        for source_id in source_ids:
+            source = by_id[source_id]
+            target["article_hashes"] = list(dict.fromkeys(
+                (target.get("article_hashes") or []) + (source.get("article_hashes") or [])
+            ))
+            existing_kw = target.get("keywords_json") or []
+            merged_kw = list(dict.fromkeys(existing_kw + (source.get("keywords_json") or [])))
+            target["keywords_json"] = merged_kw
+            merged_away.add(source_id)
+
+        total_merged += len(source_ids)
+        log.info("Merged %d clusters → \"%s\"", len(source_ids) + 1, new_title)
+
+    remaining = [c for c in clusters if c["id"] not in merged_away]
+    log.info("Cluster merging done: %d merges, %d clusters remaining", total_merged, len(remaining))
+    return remaining, total_merged

@@ -1,14 +1,15 @@
-"""Prompt Lab — propose and evaluate candidate prompts.
+"""Prompt Lab — propose a candidate prompt improvement (R&D helper).
 
-This module intentionally never activates a prompt automatically. It creates
-candidate prompts and LLM evaluations so a human can validate the production
-change with context.
+There is no D1 route for prompt_evaluations/candidate versioning (Prompt Lab
+is a low-usage R&D feature per the D1 migration scope), so this module no
+longer stores candidates or evaluations. It still calls the LLM to draft a
+suggestion and logs it for manual review — nothing is persisted or activated
+automatically.
 """
 
 from __future__ import annotations
 
 import logging
-from string import Formatter
 
 from . import db
 from .llm_analyzer import analyze_with_deepseek, analyze_with_openai
@@ -48,51 +49,6 @@ Réponds uniquement en JSON:
 }}"""
 
 
-PROMPT_EVALUATOR_PROMPT = """Tu es évaluateur critique de prompts pour TechPulse.
-
-Évalue ce prompt candidat pour la tâche {task}, thème {theme}.
-
-Prompt actuel:
----
-{current_prompt}
----
-
-Prompt candidat:
----
-{candidate_prompt}
----
-
-Critères:
-- clarté et maintenabilité
-- profondeur réelle de l'analyse
-- différenciation avec les autres écrans
-- robustesse JSON
-- réduction des hallucinations
-- adaptation à TechPulse
-- coût probable
-
-Réponds uniquement en JSON:
-{{
-  "score": 0,
-  "recommendation": "activate" | "keep_testing" | "reject",
-  "strengths": ["..."],
-  "weaknesses": ["..."],
-  "required_checks": ["..."],
-  "final_assessment": "paragraphe court en français"
-}}"""
-
-
-def _extract_variables(template: str) -> list[str]:
-    variables: list[str] = []
-    for _, field_name, _, _ in Formatter().parse(template):
-        if not field_name:
-            continue
-        root = field_name.split(".", 1)[0].split("[", 1)[0]
-        if root and root not in variables:
-            variables.append(root)
-    return variables
-
-
 def propose_and_evaluate_prompt(
     cur,
     *,
@@ -100,7 +56,9 @@ def propose_and_evaluate_prompt(
     theme: str = "general",
     improvement_goal: str,
 ) -> str | None:
-    """Create a candidate prompt and store a critic evaluation."""
+    """Draft a candidate prompt and log it. No storage: Prompt Lab evaluation
+    has no D1 route (secondary R&D feature), so this is a skip-with-log no-op
+    beyond generating the suggestion for manual copy/paste review."""
     active = db.fetch_active_prompt_template(cur, task=task, theme=theme)
     if not active:
         log.warning("No active prompt found for %s/%s", task, theme)
@@ -113,63 +71,17 @@ def propose_and_evaluate_prompt(
         improvement_goal=improvement_goal,
     )
     proposal = analyze_with_deepseek(engineer_prompt, model="deepseek-v4-pro")
-    provider = "deepseek"
-    model = "deepseek-v4-pro"
-
     if not proposal:
         proposal = analyze_with_openai(engineer_prompt, model="gpt-4o-mini")
-        provider = "openai"
-        model = "gpt-4o-mini"
 
     candidate_prompt = proposal.get("candidate_prompt") if proposal else None
     if not candidate_prompt:
         log.warning("Prompt Lab proposal failed for %s/%s", task, theme)
         return None
 
-    candidate_id = db.insert_prompt_candidate(
-        cur,
-        task=task,
-        theme=theme,
-        template=candidate_prompt,
-        variables=_extract_variables(candidate_prompt),
-        parent_id=active["id"],
-        model_provider=provider,
-        model_name=model,
-        evaluator_notes={
-            "proposal": {
-                "change_summary": proposal.get("change_summary", []),
-                "expected_benefits": proposal.get("expected_benefits", []),
-                "risks": proposal.get("risks", []),
-            },
-        },
+    log.info(
+        "Prompt Lab candidate for %s/%s (evaluation skipped, no D1 route):\n%s",
+        task, theme, candidate_prompt,
     )
-
-    evaluator_prompt = PROMPT_EVALUATOR_PROMPT.format(
-        task=task,
-        theme=theme,
-        current_prompt=active["template"],
-        candidate_prompt=candidate_prompt,
-    )
-    evaluation = analyze_with_openai(evaluator_prompt, model="gpt-4o-mini")
-    evaluator_provider = "openai"
-    evaluator_model = "gpt-4o-mini"
-
-    if not evaluation:
-        evaluation = analyze_with_deepseek(evaluator_prompt, model="deepseek-v4-flash")
-        evaluator_provider = "deepseek"
-        evaluator_model = "deepseek-v4-flash"
-
-    if evaluation:
-        db.insert_prompt_evaluation(
-            cur,
-            prompt_template_id=candidate_id,
-            evaluator_provider=evaluator_provider,
-            evaluator_model=evaluator_model,
-            score=int(evaluation.get("score") or 0),
-            recommendation=evaluation.get("recommendation") or "keep_testing",
-            notes=evaluation,
-            sample_count=0,
-        )
-
-    log.info("Prompt Lab candidate created: %s for %s/%s", candidate_id, task, theme)
-    return candidate_id
+    log.info("Change summary: %s", proposal.get("change_summary", []))
+    return None

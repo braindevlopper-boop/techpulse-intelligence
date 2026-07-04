@@ -1,20 +1,34 @@
-"""Clustering engine using pgvector similarity in Neon."""
+"""Clustering engine — simple dedup over D1 articles, no embeddings.
+
+Three signals decide if a new article joins an existing (recent) cluster:
+  1. Canonical URL match (same normalized URL → same cluster, always).
+  2. Title similarity (Jaccard over normalized tokens) against the cluster's
+     founder title, within the time window.
+  3. Keyword/theme overlap as a secondary signal alongside title similarity.
+
+The BRAND_TOKENS/lexical-guard idea from the embedding-era clusterer was
+already pure text matching, so it's reused as-is here as an anti-false-positive
+guard: a merge only goes through if the title/keyword similarity is either
+strong on its own, or moderate with a shared brand/anchor token.
+"""
 
 import logging
 import os
 import re
-import numpy as np
+from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+from datetime import datetime, timezone
 
 from . import db
 
 log = logging.getLogger(__name__)
 
-SAME_EVENT_THRESHOLD = float(os.getenv("TECHPULSE_SAME_EVENT_THRESHOLD", "0.84"))
-SAME_THEME_THRESHOLD = float(os.getenv("TECHPULSE_SAME_THEME_THRESHOLD", "0.68"))
-NEW_TOPIC_THRESHOLD = 0.60
+CLUSTER_WINDOW_HOURS = int(os.getenv("TECHPULSE_CLUSTER_WINDOW_HOURS", "72"))
+TITLE_SIM_THRESHOLD = float(os.getenv("TECHPULSE_TITLE_SIM_THRESHOLD", "0.62"))
+KEYWORD_SIM_THRESHOLD = float(os.getenv("TECHPULSE_KEYWORD_SIM_THRESHOLD", "0.5"))
 MAX_CLUSTER_SIZE = 12
 
 TITLE_STOPWORDS = {
+    # English
     "about", "after", "again", "ahead", "amid", "and", "are", "back", "been",
     "but", "can", "for", "from", "has", "have", "how", "into", "its", "new",
     "now", "off", "our", "over", "says", "the", "their", "this", "through",
@@ -27,6 +41,11 @@ TITLE_STOPWORDS = {
     "announcement", "announcements", "update", "updates",
     "biggest", "calendar", "coverage", "live", "recap", "showcase",
     "storylines", "trailer", "trailers",
+    # French
+    "les", "des", "sur", "pour", "avec", "dans", "une", "un", "sont", "est",
+    "par", "cette", "plus", "vers", "aux", "son", "sa", "ses", "que", "qui",
+    "nouveau", "nouvelle", "actualite", "actualites", "marche", "marches",
+    "entreprise", "entreprises",
 }
 
 BRAND_TOKENS = {
@@ -35,25 +54,38 @@ BRAND_TOKENS = {
     "oracle", "spacex", "stripe", "tesla",
 }
 
-
-def parse_embedding(embedding_str: str) -> list[float]:
-    """Parse a pgvector text representation back to a list of floats."""
-    clean = embedding_str.strip("[]")
-    return [float(x) for x in clean.split(",")]
+TRACKING_QUERY_PREFIXES = ("utm_", "ref", "fbclid", "gclid", "mc_", "icid", "cmp")
 
 
-def cosine_similarity(a: list[float], b: list[float]) -> float:
-    a_np = np.array(a)
-    b_np = np.array(b)
-    dot = np.dot(a_np, b_np)
-    norm = np.linalg.norm(a_np) * np.linalg.norm(b_np)
-    if norm == 0:
-        return 0.0
-    return float(dot / norm)
+def canonical_url(url: str | None) -> str | None:
+    """Normalize a URL for exact dedup: lowercase host, strip tracking params
+    and trailing slash, drop fragment."""
+    if not url:
+        return None
+    try:
+        parts = urlsplit(url.strip())
+    except ValueError:
+        return None
+
+    scheme = "https"
+    netloc = parts.netloc.lower()
+    if netloc.startswith("www."):
+        netloc = netloc[4:]
+
+    path = parts.path.rstrip("/") or ""
+
+    kept_query = [
+        (k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+        if not any(k.lower().startswith(p) for p in TRACKING_QUERY_PREFIXES)
+    ]
+    query = urlencode(sorted(kept_query))
+
+    return urlunsplit((scheme, netloc, path, query, ""))
 
 
 def title_tokens(title: str | None) -> set[str]:
-    """Extract distinctive title tokens used as a guard for broad themes."""
+    """Normalize a title into a set of distinctive tokens (used for both
+    Jaccard similarity and the brand/anchor guard)."""
     if not title:
         return set()
     tokens = set()
@@ -67,29 +99,51 @@ def title_tokens(title: str | None) -> set[str]:
     return tokens
 
 
-def _list_tokens(values) -> set[str]:
+def jaccard(a: set, b: set) -> float:
+    if not a or not b:
+        return 0.0
+    inter = len(a & b)
+    union = len(a | b)
+    return inter / union if union else 0.0
+
+
+def _parse_keywords(raw) -> set[str]:
+    """keywords_json comes back as a JSON string or already-parsed list."""
+    if not raw:
+        return set()
+    if isinstance(raw, str):
+        import json
+        try:
+            raw = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return set()
+    if not isinstance(raw, list):
+        return set()
     tokens = set()
-    if not values:
-        return tokens
-    for value in values:
-        if isinstance(value, dict):
-            value = value.get("name")
-        tokens.update(title_tokens(str(value) if value else ""))
+    for kw in raw:
+        if isinstance(kw, dict):
+            kw = kw.get("name") or kw.get("keyword")
+        if not kw:
+            continue
+        tokens.update(title_tokens(str(kw)))
     return tokens
 
 
-def article_signal_tokens(article: dict) -> set[str]:
-    tokens = set()
-    tokens.update(title_tokens(article.get("canonical_title") or article.get("title")))
-    tokens.update(title_tokens(article.get("primary_domain")))
-    tokens.update(title_tokens(article.get("topic")))
-    tokens.update(title_tokens(article.get("event_fingerprint")))
-    tokens.update(title_tokens(article.get("cluster_hint")))
-    tokens.update(_list_tokens(article.get("subtopics")))
-    tokens.update(_list_tokens(article.get("entities")))
-    tokens.update(_list_tokens(article.get("keywords")))
-    tokens.update(_list_tokens(article.get("tags")))
-    return tokens
+def _parse_time(value) -> datetime | None:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    try:
+        text = str(value).replace("Z", "+00:00")
+        dt = datetime.fromisoformat(text)
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def article_theme(article: dict) -> str:
+    return (article.get("classified_theme") or article.get("theme") or "").strip().lower()
 
 
 def lexical_anchor_score(article_tokens: set[str], cluster_tokens: set[str]) -> int:
@@ -99,154 +153,193 @@ def lexical_anchor_score(article_tokens: set[str], cluster_tokens: set[str]) -> 
     return score
 
 
-def passes_lexical_guard(article: dict, cluster_tokens: set[str],
-                         similarity: float, founder_similarity: float) -> bool:
-    """Avoid merging broad semantic neighbors that do not share strong anchors."""
-    article_tokens = article_signal_tokens(article)
+def passes_lexical_guard(article_tokens: set[str], cluster_tokens: set[str],
+                         title_sim: float, keyword_sim: float) -> bool:
+    """Anti-false-positive guard, reused as-is from the embedding-era clusterer
+    (it was already pure text matching, no embeddings involved)."""
     anchor_score = lexical_anchor_score(article_tokens, cluster_tokens)
+    best_sim = max(title_sim, keyword_sim)
 
-    if anchor_score >= 2 and max(similarity, founder_similarity) >= SAME_EVENT_THRESHOLD:
+    if anchor_score >= 2 and best_sim >= 0.7:
         return True
 
     has_brand_overlap = bool((article_tokens & cluster_tokens) & BRAND_TOKENS)
-    if has_brand_overlap and anchor_score >= 3 and max(similarity, founder_similarity) >= 0.78:
+    if has_brand_overlap and anchor_score >= 3 and best_sim >= 0.55:
         return True
 
-    if anchor_score >= 3 and max(similarity, founder_similarity) >= 0.80:
+    if anchor_score >= 3 and best_sim >= 0.6:
         return True
 
-    return anchor_score >= 4 and max(similarity, founder_similarity) >= 0.76
+    return anchor_score >= 4 and best_sim >= 0.5
 
 
-def run_clustering(cur) -> tuple[int, int]:
-    """Cluster processed articles using pgvector similarity.
+class ClusterCandidate:
+    """In-memory view of a cluster being built/extended during this run."""
 
-    Anti-snowball measures:
-      - Clusters are capped at MAX_CLUSTER_SIZE articles
-      - New articles must be similar to BOTH the centroid AND the
-        founding article (prevents centroid drift)
+    __slots__ = ("id", "title", "theme", "dedup_title", "founder_hash",
+                 "title_tokens", "keyword_tokens", "canonical_urls",
+                 "article_hashes", "latest_at")
+
+    def __init__(self, id_: str, title: str, theme: str, dedup_title: str,
+                 founder_hash: str):
+        self.id = id_
+        self.title = title
+        self.theme = theme
+        self.dedup_title = dedup_title
+        self.founder_hash = founder_hash
+        self.title_tokens = title_tokens(dedup_title)
+        self.keyword_tokens: set[str] = set()
+        self.canonical_urls: set[str] = set()
+        self.article_hashes: list[str] = []
+        self.latest_at: datetime | None = None
+
+    def add(self, article: dict, url_norm: str | None):
+        self.article_hashes.append(article["hash"])
+        self.keyword_tokens.update(_parse_keywords(article.get("keywords_json")))
+        if url_norm:
+            self.canonical_urls.add(url_norm)
+        pub = _parse_time(article.get("published_at")) or _parse_time(article.get("fetched_at"))
+        if pub and (self.latest_at is None or pub > self.latest_at):
+            self.latest_at = pub
+
+
+def run_clustering(articles: list[dict]) -> tuple[int, int]:
+    """Dedup+cluster recent articles using URL/title/keyword signals.
+
+    `articles` should already be scoped to the clustering window (see
+    db.fetch_processed_articles(hours=CLUSTER_WINDOW_HOURS)).
+
+    Returns (clusters_created, clusters_updated_with_new_articles).
     """
-    articles = db.fetch_processed_articles(cur)
     if not articles:
         log.info("No articles to cluster")
         return 0, 0
 
-    clusters = db.fetch_active_clusters(cur)
-    log.info("Clustering %d articles against %d existing clusters", len(articles), len(clusters))
+    log.info("Clustering %d articles (window=%dh)", len(articles), CLUSTER_WINDOW_HOURS)
 
-    cluster_data = {}
-    for c in clusters:
-        if c["centroid_str"]:
-            cluster_data[c["id"]] = {
-                "title": c["title"],
-                "tokens": title_tokens(c["title"])
-                | _list_tokens(c.get("primary_domains"))
-                | _list_tokens(c.get("topics"))
-                | _list_tokens(c.get("event_fingerprints"))
-                | _list_tokens(c.get("cluster_hints")),
-                "event_fingerprints": set(c.get("event_fingerprints") or []),
-                "primary_domains": set(c.get("primary_domains") or []),
-                "centroid": parse_embedding(c["centroid_str"]),
-                "founder_embedding": parse_embedding(c.get("founder_embedding_str") or c["centroid_str"]),
-                "article_count": c["article_count"],
-                "source_names": set(c.get("source_names") or []),
-            }
+    # Sort oldest → newest so earlier articles become founders of their cluster.
+    def sort_key(a):
+        return _parse_time(a.get("published_at")) or _parse_time(a.get("fetched_at")) or datetime.min.replace(tzinfo=timezone.utc)
 
+    articles = sorted(articles, key=sort_key)
+
+    # Articles already carry cluster_id from previous runs (denormalized by
+    # the Worker). Re-hydrate those as existing ClusterCandidates first, using
+    # their real id — only articles with cluster_id=None are up for grouping.
+    # Without this, every run would mint brand-new random cluster ids and
+    # duplicate every cluster instead of growing them across the 3x/day cron.
+    by_url: dict[str, ClusterCandidate] = {}
+    clusters_by_id: dict[str, ClusterCandidate] = {}
+    unclustered: list[dict] = []
     created = 0
     updated = 0
 
     for article in articles:
-        if not article["embedding_str"]:
+        existing_cluster_id = article.get("cluster_id")
+        if not existing_cluster_id:
+            unclustered.append(article)
             continue
 
-        emb = parse_embedding(article["embedding_str"])
-        best_cluster_id = None
-        best_similarity = 0.0
-        best_accept_threshold = SAME_THEME_THRESHOLD
+        url_norm = canonical_url(article.get("url"))
+        cand = clusters_by_id.get(existing_cluster_id)
+        if cand is None:
+            title = article.get("title") or ""
+            cand = ClusterCandidate(
+                id_=existing_cluster_id,
+                title=title[:200],
+                theme=article_theme(article),
+                dedup_title=title[:200],
+                founder_hash=article["hash"],
+            )
+            clusters_by_id[existing_cluster_id] = cand
+        cand.add(article, url_norm)
+        if url_norm:
+            by_url[url_norm] = cand
 
-        for cid, cdata in cluster_data.items():
-            # Skip full clusters
-            if cdata["article_count"] >= MAX_CLUSTER_SIZE:
+    clusters: list[ClusterCandidate] = list(clusters_by_id.values())
+
+    for article in unclustered:
+        url_norm = canonical_url(article.get("url"))
+        article_kw = _parse_keywords(article.get("keywords_json"))
+        article_title_tokens = title_tokens(article.get("title"))
+        theme = article_theme(article)
+
+        # 1. Exact canonical URL match — always the same cluster.
+        if url_norm and url_norm in by_url:
+            target = by_url[url_norm]
+            target.add(article, url_norm)
+            updated += 1
+            continue
+
+        # 2/3. Title similarity + keyword/theme overlap against active clusters
+        # in the time window, guarded by the lexical anchor check.
+        best_cluster = None
+        best_score = 0.0
+
+        for cand in clusters:
+            if len(cand.article_hashes) >= MAX_CLUSTER_SIZE:
                 continue
 
-            sim = cosine_similarity(emb, cdata["centroid"])
-            if sim > best_similarity:
-                # Also check similarity with the founding article
-                founder_sim = cosine_similarity(emb, cdata["founder_embedding"])
-                article_fingerprint = article.get("event_fingerprint")
-                same_event = bool(
-                    article_fingerprint
-                    and article_fingerprint in cdata.get("event_fingerprints", set())
-                )
-                domain_overlap = bool(
-                    article.get("primary_domain")
-                    and article["primary_domain"] in cdata.get("primary_domains", set())
-                )
-                dynamic_threshold = SAME_THEME_THRESHOLD
-                if same_event:
-                    dynamic_threshold = min(dynamic_threshold, 0.62)
-                elif domain_overlap and article.get("topic"):
-                    dynamic_threshold = max(dynamic_threshold, 0.76)
+            title_sim = jaccard(article_title_tokens, cand.title_tokens)
+            keyword_sim = jaccard(article_kw, cand.keyword_tokens)
+            same_theme = bool(theme and theme == cand.theme)
 
-                guard_ok = same_event or passes_lexical_guard(
-                    article, cdata.get("tokens", set()), sim, founder_sim
-                )
-                if founder_sim >= dynamic_threshold and guard_ok:
-                    best_similarity = sim
-                    best_cluster_id = cid
-                    best_accept_threshold = dynamic_threshold
-
-        if best_similarity >= best_accept_threshold and best_cluster_id:
-            role = "primary" if best_similarity >= SAME_EVENT_THRESHOLD else "supporting"
-            db.update_article_cluster(cur, article["id"], best_cluster_id)
-            db.insert_cluster_article(cur, best_cluster_id, article["id"], float(best_similarity), role)
-
-            cdata = cluster_data[best_cluster_id]
-            cdata["article_count"] += 1
-            cdata["source_names"].add(article["source_name"])
-            cdata["tokens"].update(article_signal_tokens(article))
-            if article.get("event_fingerprint"):
-                cdata["event_fingerprints"].add(article["event_fingerprint"])
-            if article.get("primary_domain"):
-                cdata["primary_domains"].add(article["primary_domain"])
-
-            # Update centroid (slow drift — weighted toward founder)
-            count = cdata["article_count"]
-            alpha = 1.0 / count
-            new_centroid = [
-                (1 - alpha) * c + alpha * e
-                for c, e in zip(cdata["centroid"], emb)
-            ]
-            norm = np.linalg.norm(new_centroid)
-            if norm > 0:
-                new_centroid = [x / norm for x in new_centroid]
-            cdata["centroid"] = new_centroid
-
-            db.update_cluster_centroid(
-                cur, best_cluster_id, new_centroid,
-                cdata["article_count"], len(cdata["source_names"]),
+            qualifies = title_sim >= TITLE_SIM_THRESHOLD or (
+                same_theme and keyword_sim >= KEYWORD_SIM_THRESHOLD
             )
+            if not qualifies:
+                continue
+
+            guard_ok = passes_lexical_guard(
+                article_title_tokens | article_kw,
+                cand.title_tokens | cand.keyword_tokens,
+                title_sim, keyword_sim,
+            )
+            if not guard_ok:
+                continue
+
+            score = max(title_sim, keyword_sim if same_theme else 0.0)
+            if score > best_score:
+                best_score = score
+                best_cluster = cand
+
+        if best_cluster:
+            best_cluster.add(article, url_norm)
+            if url_norm:
+                by_url[url_norm] = best_cluster
             updated += 1
-
         else:
-            # Create new cluster — this article becomes the founder
             new_id = db.gen_id()
-            title = article.get("cluster_hint") or article.get("canonical_title") or article["title"]
-            db.create_cluster(cur, new_id, title[:200], emb)
-            db.update_article_cluster(cur, article["id"], new_id)
-            db.insert_cluster_article(cur, new_id, article["id"], 1.0, "primary")
-
-            cluster_data[new_id] = {
-                "title": title[:200],
-                "tokens": article_signal_tokens(article),
-                "event_fingerprints": {article["event_fingerprint"]} if article.get("event_fingerprint") else set(),
-                "primary_domains": {article["primary_domain"]} if article.get("primary_domain") else set(),
-                "centroid": emb,
-                "founder_embedding": emb,
-                "article_count": 1,
-                "source_names": {article["source_name"]},
-            }
+            dedup_title = article.get("title") or ""
+            cand = ClusterCandidate(
+                id_=new_id,
+                title=dedup_title[:200],
+                theme=theme,
+                dedup_title=dedup_title[:200],
+                founder_hash=article["hash"],
+            )
+            cand.add(article, url_norm)
+            clusters.append(cand)
+            if url_norm:
+                by_url[url_norm] = cand
             created += 1
 
-    log.info("Clustering done: %d created, %d updated", created, updated)
+    payload = []
+    for cand in clusters:
+        payload.append({
+            "id": cand.id,
+            "title": cand.title,
+            "theme": cand.theme or None,
+            "dedup_title": cand.dedup_title,
+            "keywords_json": list(cand.keyword_tokens)[:20],
+            "article_hashes": cand.article_hashes,
+            "founder_hash": cand.founder_hash,
+            "status": "active",
+        })
+
+    if payload:
+        result = db.push_clusters(payload)
+        log.info("Pushed %d clusters to Worker (%s)", len(payload), result)
+
+    log.info("Clustering done: %d new clusters, %d articles merged into existing/new clusters", created, updated)
     return created, updated
