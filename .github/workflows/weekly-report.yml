@@ -1,8 +1,6 @@
 name: TechPulse Weekly Report
 
 on:
-  schedule:
-    - cron: '0 20 * * 0'         # Sunday 20h UTC
   workflow_dispatch: {}
 
 jobs:
